@@ -1,0 +1,21 @@
+# Environments
+venv/
+env/
+.env
+
+# Python internals
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Project Specifics
+models/*
+!models/.gitkeep
+
+outputs/*
+!outputs/.gitkeep
+
+# Operating System files
+.DS_Store
+Thumbs.db
