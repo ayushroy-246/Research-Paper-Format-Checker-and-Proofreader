@@ -2,12 +2,20 @@
 venv/
 env/
 .env
+.vscode/
+.idea/
 
 # Python internals
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+backend/venv/
+backend/__pycache__/
+backend/**/*.py[cod]
+backend/.cache/
+backend/*.zip
 
 # Project Specifics
 models/*
@@ -19,3 +27,7 @@ outputs/*
 # Operating System files
 .DS_Store
 Thumbs.db
+
+*.zip
+
+*.jar
