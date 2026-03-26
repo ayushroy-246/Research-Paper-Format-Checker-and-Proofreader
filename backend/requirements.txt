@@ -1,5 +1,6 @@
-# UI and App Framework
-streamlit==1.55.0
+# Flask Backend
+flask==3.1.0
+flask-cors==5.0.1
 python-dotenv==1.2.2
 requests==2.32.5
 
