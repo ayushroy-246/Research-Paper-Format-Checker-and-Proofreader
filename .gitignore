@@ -24,6 +24,9 @@ models/*
 outputs/*
 !outputs/.gitkeep
 
+backend/outputs/*
+!backend/outputs/.gitkeep
+
 # Operating System files
 .DS_Store
 Thumbs.db
@@ -31,3 +34,6 @@ Thumbs.db
 *.zip
 
 *.jar
+
+*.pdf
+
