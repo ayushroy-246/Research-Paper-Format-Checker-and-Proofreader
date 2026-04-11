@@ -198,13 +198,13 @@ def analyze():
         issues["errors"].append({"module": "format_checker", "error": str(e)})
 
     # ── Citation check (Member 4) ──
-    # parsed_document=page_texts — citation_checker now handles dict format natively
+    # parsed_document=spans — citation_checker expects the raw span list for page lookup
     try:
         issues["citations"] = check_citations(
             full_text=full_text,
             standard=standard,
             paper_type=paper_type,
-            parsed_document=page_texts,
+            parsed_document=spans,       # raw span list — citation_checker uses this for page lookup
             use_crossref=use_crossref,
         )
     except Exception as e:
