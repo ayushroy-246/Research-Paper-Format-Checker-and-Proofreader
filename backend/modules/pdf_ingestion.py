@@ -51,24 +51,6 @@ def extract_structure(pdf_path: str) -> list:
     return results
 
 
-def save_full_text(data : list, output_path: str) -> None:
-    """
-    Combines all the span text info on plain text file.
-    data: the list returned by extract_structure()
-    output_path: where to save the .txt file
-    """
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True) # create outputs/ folder if it doesn't exist 
-
-    full_text = " ".join(span["text"] for span in data) # join all span texts with a space  JS: data.map(span => span.text).join(" ")
-
-    
-    f = open(output_path, "w", encoding="utf-8")
-    try: 
-        f.write(full_text)
-    finally:
-        f.close()
-
 def save_json(data: list, output_path: str) -> None:
     """
     Saves the extracted span data as a JSON file.
