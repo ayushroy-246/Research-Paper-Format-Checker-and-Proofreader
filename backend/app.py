@@ -183,9 +183,9 @@ def analyze():
     issues = {"grammar": [], "formatting": [], "citations": [], "errors": []}
 
     # ── Grammar check (Member 3) ──
-    # Passes full_text_by_page dict — grammar_checker now handles this format natively
+    # Pass spans directly — grammar_checker has assemble_doc_from_spans() built-in for this
     try:
-        issues["grammar"] = check_grammar(page_texts)
+        issues["grammar"] = check_grammar(spans)
     except Exception as e:
         issues["errors"].append({"module": "grammar_checker", "error": str(e)})
 
