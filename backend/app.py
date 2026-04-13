@@ -141,7 +141,7 @@ def analyze():
                 "errors":     [ ...any module crash reports... ]
             },
             "summary": {
-                "total": int, "critical": int, "warning": int, "info": int
+                "total": int, "critical": int, "warning": int, "info": int, "score": int
             }
         }
     """
@@ -210,13 +210,22 @@ def analyze():
     except Exception as e:
         issues["errors"].append({"module": "citation_checker", "error": str(e)})
 
-    # ── Build summary counts ──
+    # ── Build summary counts and calculate score ──
     all_issues = issues["grammar"] + issues["formatting"] + issues["citations"]
+    
+    critical_count = sum(1 for i in all_issues if i.get("severity") == "critical")
+    warning_count = sum(1 for i in all_issues if i.get("severity") == "warning")
+    info_count = sum(1 for i in all_issues if i.get("severity") == "info")
+
+    # Calculate score based on weighted deductions
+    score = 100 - (critical_count * 5) - (warning_count * 2) - (info_count * 1)
+    
     summary = {
         "total":    len(all_issues),
-        "critical": sum(1 for i in all_issues if i.get("severity") == "critical"),
-        "warning":  sum(1 for i in all_issues if i.get("severity") == "warning"),
-        "info":     sum(1 for i in all_issues if i.get("severity") == "info"),
+        "critical": critical_count,
+        "warning":  warning_count,
+        "info":     info_count,
+        "score":    max(0, score)  # Ensure score doesn't go below 0
     }
 
     return jsonify({
