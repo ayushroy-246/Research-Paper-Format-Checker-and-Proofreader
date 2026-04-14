@@ -58,7 +58,7 @@ const ResultsPage = () => {
       <div className="bg-white p-6 rounded-lg shadow-lg mb-8 flex flex-col items-center text-center">
         <h2 className="text-3xl font-bold text-gray-800 mb-6">Analysis Complete</h2>
         
-        <div className="h-48 w-[300px]">
+        <div className="h-48 w-75">
           <ReactSpeedometer
             value={summary.score || 0}
             minValue={0}
@@ -101,7 +101,7 @@ const ResultsPage = () => {
                   <svg fill="none" height="24" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" width="24"><polyline points="6 9 12 15 18 9"/></svg>
                 </span>
               </summary>
-              <div className="p-4 space-y-4 max-h-[400px] overflow-y-auto bg-white">
+              <div className="p-4 space-y-4 max-h-100 overflow-y-auto bg-white">
                 {issueList.map((issue, index) => (
                   <div key={index} className={`p-4 border-l-4 rounded-r-lg ${getSeverityClass(issue.severity)}`}>
                     <p className="font-bold">{issue.message}</p>

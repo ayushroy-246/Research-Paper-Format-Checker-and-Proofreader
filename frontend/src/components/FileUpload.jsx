@@ -80,7 +80,7 @@ const FileUpload = () => {
         <div className="flex justify-center w-full">
           <div
             {...getRootProps()}
-            className={`w-[800px] h-[350px] flex items-center justify-center rounded-[10px] text-center cursor-pointer transition-all duration-300 shadow-[0_10px_40px_rgba(0,0,0,0.08)] ${
+            className={`w-200 h-87.5 flex items-center justify-center rounded-[10px] text-center cursor-pointer transition-all duration-300 shadow-[0_10px_40px_rgba(0,0,0,0.08)] ${
               isDragActive ? 'bg-[#ffeb00] scale-[1.02]' : 'bg-[#e5322d] hover:bg-[#d62828]'
             }`}
           >
@@ -101,9 +101,9 @@ const FileUpload = () => {
       ) : (
         <div className="flex flex-col lg:flex-row shadow-[0_10px_40px_rgba(0,0,0,0.08)] rounded-[10px] bg-[#fbfbfb] overflow-hidden">
           {/* Left Side: Document Preview Area */}
-          <div className="lg:w-2/3 bg-[#f0f0f0] p-10 flex flex-col items-center justify-center relative min-h-[400px]">
+          <div className="lg:w-2/3 bg-[#f0f0f0] p-10 flex flex-col items-center justify-center relative min-h-100">
             {/* Simple File Card */}
-            <div className="bg-white p-6 shadow-sm rounded-lg flex flex-col items-center w-[220px] aspect-[1/1.4] justify-center mx-auto border border-gray-200 relative group cursor-pointer">
+            <div className="bg-white p-6 shadow-sm rounded-lg flex flex-col items-center w-55 aspect-[1/1.4] justify-center mx-auto border border-gray-200 relative group cursor-pointer">
               <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button onClick={handleRemoveFile} className="bg-red-500 text-white rounded-full p-1.5 hover:bg-red-600 shadow-md">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -130,7 +130,7 @@ const FileUpload = () => {
             {/* Loading Overlay */}
             {isLoading && (
               <div className="absolute inset-0 bg-white/80 z-10 flex flex-col items-center justify-center rounded-lg backdrop-blur-sm">
-                <div className="w-16 h-16 border-[4px] border-gray-200 border-t-[#e5322d] rounded-full animate-spin"></div>
+                <div className="w-16 h-16 border-4 border-gray-200 border-t-[#e5322d] rounded-full animate-spin"></div>
                 <p className="mt-4 text-gray-800 font-semibold text-lg">Analyzing Document...</p>
                 <p className="mt-2 text-gray-500 text-sm">Please wait</p>
               </div>
@@ -153,7 +153,7 @@ const FileUpload = () => {
                   </label>
                   <select
                     {...register('standard')}
-                    className="w-full p-4 text-[15px] font-semibold text-gray-700 bg-[#f7f7f9] border border-transparent rounded-[8px] focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
+                    className="w-full p-4 text-[15px] font-semibold text-gray-700 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
                   >
                     <option value="IEEE">IEEE — Conferences & Journals</option>
                     <option value="SPRINGER">Springer — LNCS / Journals</option>
@@ -173,7 +173,7 @@ const FileUpload = () => {
                   </label>
                   <select
                     {...register('paper_type')}
-                    className="w-full p-4 text-[15px] font-medium text-gray-600 bg-[#f7f7f9] border border-transparent rounded-[8px] focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
+                    className="w-full p-4 text-[15px] font-medium text-gray-600 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
                   >
                     <option value="">Auto-Detect</option>
                     <option value="conference_submission">Conference Submission</option>
@@ -189,7 +189,7 @@ const FileUpload = () => {
                   </label>
                   <select
                     {...register('review_mode')}
-                    className="w-full p-4 text-[15px] font-medium text-gray-600 bg-[#f7f7f9] border border-transparent rounded-[8px] focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
+                    className="w-full p-4 text-[15px] font-medium text-gray-600 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
                   >
                     <option value="">Auto-Detect</option>
                     <option value="blind">Blind Review</option>
@@ -218,7 +218,7 @@ const FileUpload = () => {
             <div className="mt-8">
                <button
                 onClick={handleUpload}
-                className="w-full py-[22px] bg-[#e5322d] text-white text-xl font-bold tracking-wide rounded-[8px] shadow-lg hover:bg-[#d62828] hover:-translate-y-1 transition-all flex items-center justify-center gap-3"
+                className="w-full py-5.5 bg-[#e5322d] text-white text-xl font-bold tracking-wide rounded-lg shadow-lg hover:bg-[#d62828] hover:-translate-y-1 transition-all flex items-center justify-center gap-3"
               >
                 Analyze Paper
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
