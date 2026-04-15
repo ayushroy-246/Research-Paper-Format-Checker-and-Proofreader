@@ -78,6 +78,49 @@ const ResultsPage = () => {
           <p><span className="font-bold text-blue-600">{summary.info}</span> Info</p>
         </div>
 
+        {/* Scoring Formula Breakdown */}
+        <details className="mt-6 w-full border border-gray-300 rounded-lg p-4 group bg-gray-50 hover:bg-gray-100 transition-colors">
+          <summary className="cursor-pointer font-semibold text-gray-800 flex justify-between items-center">
+            <span className="flex items-center gap-2">
+              <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              How is your score calculated?
+            </span>
+            <span className="transition group-open:rotate-180">
+              <svg fill="none" height="24" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" width="24"><polyline points="6 9 12 15 18 9"/></svg>
+            </span>
+          </summary>
+          <div className="mt-4 space-y-4 text-left">
+            <div className="bg-white p-4 rounded border-l-4 border-blue-500">
+              <p className="text-sm font-mono text-gray-700 mb-3">
+                <span className="font-bold text-lg">Score = 100 − (C × 3) − (W × 1) − (I × 0.3)</span>
+              </p>
+              <div className="text-sm text-gray-600 space-y-2">
+                <p><span className="font-semibold">Where:</span></p>
+                <p className="ml-4">• <span className="font-semibold text-red-600">C (Critical)</span> = min({summary.critical}, 20) = {Math.min(summary.critical, 20)}</p>
+                <p className="ml-4">• <span className="font-semibold text-yellow-600">W (Warning)</span> = min({summary.warning}, 20) = {Math.min(summary.warning, 20)}</p>
+                <p className="ml-4">• <span className="font-semibold text-blue-600">I (Info)</span> = min({summary.info}, 30) = {Math.min(summary.info, 30)}</p>
+              </div>
+            </div>
+            <div className="bg-white p-4 rounded border-l-4 border-green-500">
+              <p className="text-sm text-gray-600"><span className="font-semibold">Calculation:</span></p>
+              <p className="text-sm font-mono text-gray-700 mt-2">
+                100 − ({Math.min(summary.critical, 20)} × 3) − ({Math.min(summary.warning, 20)} × 1) − ({Math.min(summary.info, 30)} × 0.3)
+              </p>
+              <p className="text-sm font-mono text-gray-700 mt-2">
+                = 100 − {Math.min(summary.critical, 20) * 3} − {Math.min(summary.warning, 20)} − {(Math.min(summary.info, 30) * 0.3).toFixed(1)}
+              </p>
+              <p className="text-sm font-bold text-green-600 mt-2">
+                = <span className="text-lg">{summary.score}</span>
+              </p>
+            </div>
+            <div className="text-xs text-gray-500 bg-gray-100 p-3 rounded">
+              <p>💡 <span className="font-semibold">Note:</span> Critical and Warning counts are capped at 20 and 30 respectively to prevent scores from dropping to zero too easily. Info issues have minimal impact on your score.</p>
+            </div>
+          </div>
+        </details>
+
         <button 
           onClick={handleGenerateReport}
           disabled={isGenerating}

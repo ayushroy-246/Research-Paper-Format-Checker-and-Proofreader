@@ -19,12 +19,13 @@ API Endpoints:
 
 import os
 import json
+import sys
 
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # allows React (port 3000) to call Flask (port 5000)
+from flask_cors import CORS  # Cross-Origin Resource Sharing
+from dotenv import load_dotenv  # Load environment variables from .env
 
 # ── Add backend/ to sys.path so all module imports work correctly ─────────────
-import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 # ── Import all modules ────────────────────────────────────────────────────────
@@ -33,9 +34,23 @@ from modules.grammar_checker import check_grammar
 from modules.format_checker  import run_format_check   # one-shot helper — handles everything internally
 from modules.citation_checker import check_citations
 
+# ── Load environment variables from .env file ─────────────────────────────────
+load_dotenv()
+
 # ── Flask App Setup ───────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app)  # enable Cross-Origin Resource Sharing so React FE can reach this server
+
+# ── Configure CORS to only allow the frontend URL from .env ──────────────────
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+CORS(app, resources={
+    r"/api/*": {
+        "origins": [FRONTEND_URL],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"],
+        "supports_credentials": True
+    }
+})
+print(f"[INFO] CORS enabled for: {FRONTEND_URL}")
 
 # ── Fixed output paths (relative to backend/) ────────────────────────────────
 OUTPUTS_DIR      = os.path.join(os.path.dirname(__file__), "outputs")
@@ -217,8 +232,14 @@ def analyze():
     warning_count = sum(1 for i in all_issues if i.get("severity") == "warning")
     info_count = sum(1 for i in all_issues if i.get("severity") == "info")
 
-    # Calculate score based on weighted deductions
-    score = 100 - (critical_count * 5) - (warning_count * 2) - (info_count * 1)
+    # Calculate score based on weighted deductions with logarithmic scaling
+    # Cap critical/warning at 20 each to prevent scores from hitting 0 easily
+    capped_critical = min(critical_count, 20)
+    capped_warning = min(warning_count, 20)
+    capped_info = min(info_count, 30)
+    
+    # Reduced weights: less harsh penalty per issue
+    score = 100 - (capped_critical * 3) - (capped_warning * 1) - (capped_info * 0.3)
     
     summary = {
         "total":    len(all_issues),
