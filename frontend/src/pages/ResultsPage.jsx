@@ -20,19 +20,32 @@ const ResultsPage = () => {
   const handleGenerateReport = async () => {
     setIsGenerating(true);
     try {
-      const response = await axios.post(`${import.meta.env.VITE_SERVER_URL}/api/generate-report`, { results }, {
-        responseType: 'blob'
-      });
+      console.log('Downloading analysis report from:', `${import.meta.env.VITE_SERVER_URL}/api/generate-report`);
+      
+      const response = await axios.post(
+        `${import.meta.env.VITE_SERVER_URL}/api/generate-report`, 
+        { results }, 
+        {
+          responseType: 'blob',
+          headers: { 'Content-Type': 'application/json' }
+        }
+      );
+      
+      console.log('Report generated successfully:', response.status);
+      
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
       link.setAttribute('download', 'analysis_report.pdf');
       document.body.appendChild(link);
       link.click();
-      link.remove();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      console.log('PDF download initiated');
     } catch (err) {
-      console.error('Failed to generate report:', err);
-      alert('Failed to generate report.');
+      console.error('Failed to generate report:', err.response?.status, err.message);
+      console.error('Error details:', err.response?.data);
+      alert(`Failed to generate report: ${err.response?.data?.error || err.message}`);
     } finally {
       setIsGenerating(false);
     }
@@ -94,29 +107,30 @@ const ResultsPage = () => {
           <div className="mt-4 space-y-4 text-left">
             <div className="bg-white p-4 rounded border-l-4 border-blue-500">
               <p className="text-sm font-mono text-gray-700 mb-3">
-                <span className="font-bold text-lg">Score = 100 − (C × 3) − (W × 1) − (I × 0.3)</span>
+                <span className="font-bold text-lg">Score = 100 − (C × 2.5) − (log(1+W) × 2) − (log(1+I) × 0.5)</span>
               </p>
               <div className="text-sm text-gray-600 space-y-2">
                 <p><span className="font-semibold">Where:</span></p>
-                <p className="ml-4">• <span className="font-semibold text-red-600">C (Critical)</span> = min({summary.critical}, 20) = {Math.min(summary.critical, 20)}</p>
-                <p className="ml-4">• <span className="font-semibold text-yellow-600">W (Warning)</span> = min({summary.warning}, 20) = {Math.min(summary.warning, 20)}</p>
-                <p className="ml-4">• <span className="font-semibold text-blue-600">I (Info)</span> = min({summary.info}, 30) = {Math.min(summary.info, 30)}</p>
+                <p className="ml-4">• <span className="font-semibold text-red-600">C (Critical)</span> = {summary.critical}</p>
+                <p className="ml-4">• <span className="font-semibold text-yellow-600">W (Warning)</span> = {summary.warning}</p>
+                <p className="ml-4">• <span className="font-semibold text-blue-600">I (Info)</span> = {summary.info}</p>
+                <p className="ml-4 mt-2 text-xs text-gray-500">log = natural logarithm (ln)</p>
               </div>
             </div>
             <div className="bg-white p-4 rounded border-l-4 border-green-500">
               <p className="text-sm text-gray-600"><span className="font-semibold">Calculation:</span></p>
               <p className="text-sm font-mono text-gray-700 mt-2">
-                100 − ({Math.min(summary.critical, 20)} × 3) − ({Math.min(summary.warning, 20)} × 1) − ({Math.min(summary.info, 30)} × 0.3)
+                100 − ({summary.critical} × 2.5) − (log(1+{summary.warning}) × 2) − (log(1+{summary.info}) × 0.5)
               </p>
               <p className="text-sm font-mono text-gray-700 mt-2">
-                = 100 − {Math.min(summary.critical, 20) * 3} − {Math.min(summary.warning, 20)} − {(Math.min(summary.info, 30) * 0.3).toFixed(1)}
+                = 100 − {(summary.critical * 2.5).toFixed(1)} − {(Math.log(1 + summary.warning) * 2).toFixed(2)} − {(Math.log(1 + summary.info) * 0.5).toFixed(2)}
               </p>
               <p className="text-sm font-bold text-green-600 mt-2">
                 = <span className="text-lg">{summary.score}</span>
               </p>
             </div>
             <div className="text-xs text-gray-500 bg-gray-100 p-3 rounded">
-              <p>💡 <span className="font-semibold">Note:</span> Critical and Warning counts are capped at 20 and 30 respectively to prevent scores from dropping to zero too easily. Info issues have minimal impact on your score.</p>
+              <p>💡 <span className="font-semibold">How it works:</span> Critical issues have direct linear penalty (2.5 per issue). Warnings and Info use logarithmic scaling, so papers with many issues are penalized fairly—150+ warnings score lower than 50-70 warnings, but without harsh cliffs.</p>
             </div>
           </div>
         </details>
@@ -126,7 +140,7 @@ const ResultsPage = () => {
           disabled={isGenerating}
           className="mt-6 px-6 py-3 bg-[#e5322d] text-white font-bold rounded-lg shadow hover:bg-[#d62828] transition-colors disabled:opacity-50 flex gap-2 items-center"
         >
-          {isGenerating ? 'Generating...' : 'Download Full Report'}
+          {isGenerating ? 'Generating Report...' : 'Download Analysis Report'}
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
           </svg>
@@ -135,11 +149,12 @@ const ResultsPage = () => {
 
       <div className="bg-white rounded-lg shadow-lg p-6">
         <h2 className="text-2xl font-bold text-gray-800 mb-6">Detailed Findings</h2>
-        {Object.entries(issues).map(([category, issueList]) =>
-          issueList.length > 0 && (
+        {Object.entries(issues).map(([category, issueList]) => {
+          const hasCritical = issueList.some(issue => issue.severity === 'critical');
+          return issueList.length > 0 && (
             <details key={category} className="mb-4 group border border-gray-200 rounded-lg">
-              <summary className="text-xl font-semibold capitalize p-4 cursor-pointer bg-gray-50 flex justify-between items-center group-open:border-b border-gray-200 hover:bg-gray-100 transition-colors">
-                <span className="text-gray-800">{category} Issues <span className="bg-gray-200 text-gray-700 text-sm py-1 px-2 rounded-full ml-2">{issueList.length}</span></span>
+              <summary className={`text-xl font-semibold capitalize p-4 cursor-pointer flex justify-between items-center group-open:border-b border-gray-200 transition-colors ${hasCritical ? 'bg-red-50 hover:bg-red-100' : 'bg-gray-50 hover:bg-gray-100'}`}>
+                <span className={hasCritical ? 'text-red-700' : 'text-gray-800'}>{hasCritical && '⚠️ '}{category} Issues <span className={`text-sm py-1 px-2 rounded-full ml-2 ${hasCritical ? 'bg-red-200 text-red-700' : 'bg-gray-200 text-gray-700'}`}>{issueList.length}</span></span>
                 <span className="transition group-open:rotate-180">
                   <svg fill="none" height="24" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" width="24"><polyline points="6 9 12 15 18 9"/></svg>
                 </span>
@@ -155,8 +170,8 @@ const ResultsPage = () => {
                 ))}
               </div>
             </details>
-          )
-        )}
+          );
+        })}
       </div>
     </div>
   );

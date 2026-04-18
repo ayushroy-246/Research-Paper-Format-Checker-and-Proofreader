@@ -151,19 +151,22 @@ const FileUpload = () => {
                   <label className="block text-[13px] font-bold text-gray-800 uppercase tracking-wider mb-2">
                     Citation Standard
                   </label>
-                  <select
-                    {...register('standard')}
-                    className="w-full p-4 text-[15px] font-semibold text-gray-700 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
-                  >
-                    <option value="IEEE">IEEE — Conferences & Journals</option>
-                    <option value="SPRINGER">Springer — LNCS / Journals</option>
-                    <option value="ELSEVIER">Elsevier — Journals</option>
-                    <option value="ACL">ACL — NLP Conferences</option>
-                    <option value="CVPR">CVPR — Computer Vision</option>
-                    <option value="NeurIPS">NeurIPS — Machine Learning</option>
-                    <option value="ICML">ICML — Machine Learning</option>
-                    <option value="AAAI">AAAI — AI</option>
-                  </select>
+                  <div className="relative">
+                    <select
+                      {...register('standard')}
+                      className="w-full p-4 text-[15px] font-semibold text-gray-700 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer pr-10"
+                    >
+                      <option value="IEEE">IEEE — Conferences & Journals</option>
+                      <option value="SPRINGER">Springer — LNCS / Journals</option>
+                      <option value="ELSEVIER">Elsevier — Journals</option>
+                      <option value="ACL">ACL — NLP Conferences</option>
+                      <option value="CVPR">CVPR — Computer Vision</option>
+                      <option value="NeurIPS">NeurIPS — Machine Learning</option>
+                      <option value="ICML">ICML — Machine Learning</option>
+                      <option value="AAAI">AAAI — AI</option>
+                    </select>
+                    <svg className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-700 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>
+                  </div>
                 </div>
 
                 {/* Paper Type */}
@@ -171,15 +174,18 @@ const FileUpload = () => {
                   <label className="block text-[13px] font-bold text-gray-800 uppercase tracking-wider mb-2">
                     Submit Type (Optional)
                   </label>
-                  <select
-                    {...register('paper_type')}
-                    className="w-full p-4 text-[15px] font-medium text-gray-600 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
-                  >
-                    <option value="">Auto-Detect</option>
-                    <option value="conference_submission">Conference Submission</option>
-                    <option value="journal">Journal</option>
-                    <option value="arxiv">arXiv Preprint</option>
-                  </select>
+                  <div className="relative">
+                    <select
+                      {...register('paper_type')}
+                      className="w-full p-4 text-[15px] font-medium text-gray-600 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer pr-10"
+                    >
+                      <option value="">Auto-Detect</option>
+                      <option value="conference_submission">Conference Submission</option>
+                      <option value="journal">Journal</option>
+                      <option value="arxiv">arXiv Preprint</option>
+                    </select>
+                    <svg className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-600 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>
+                  </div>
                 </div>
 
                 {/* Review Mode Dropdown */}
@@ -187,15 +193,18 @@ const FileUpload = () => {
                   <label className="block text-[13px] font-bold text-gray-800 uppercase tracking-wider mb-2">
                      Review Mode (Optional)
                   </label>
-                  <select
-                    {...register('review_mode')}
-                    className="w-full p-4 text-[15px] font-medium text-gray-600 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer"
-                  >
-                    <option value="">Auto-Detect</option>
-                    <option value="blind">Blind Review</option>
-                    <option value="camera_ready">Camera Ready</option>
-                    <option value="published">Published</option>
-                  </select>
+                  <div className="relative">
+                    <select
+                      {...register('review_mode')}
+                      className="w-full p-4 text-[15px] font-medium text-gray-600 bg-[#f7f7f9] border border-transparent rounded-lg focus:outline-none focus:ring-2 focus:ring-[#e5322d] focus:bg-white transition-all appearance-none cursor-pointer pr-10"
+                    >
+                      <option value="">Auto-Detect</option>
+                      <option value="blind">Blind Review</option>
+                      <option value="camera_ready">Camera Ready</option>
+                      <option value="published">Published</option>
+                    </select>
+                    <svg className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-600 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>
+                  </div>
                 </div>
 
                 {/* Crossref Checkbox */}

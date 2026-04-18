@@ -20,8 +20,11 @@ API Endpoints:
 import os
 import json
 import sys
+import math
+import zipfile
+from datetime import datetime
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS  # Cross-Origin Resource Sharing
 from dotenv import load_dotenv  # Load environment variables from .env
 
@@ -33,6 +36,7 @@ from modules.pdf_ingestion   import extract_structure, save_json
 from modules.grammar_checker import check_grammar
 from modules.format_checker  import run_format_check   # one-shot helper — handles everything internally
 from modules.citation_checker import check_citations
+from modules.report_generator import generate_summary_report_pdf
 
 # ── Load environment variables from .env file ─────────────────────────────────
 load_dotenv()
@@ -232,21 +236,23 @@ def analyze():
     warning_count = sum(1 for i in all_issues if i.get("severity") == "warning")
     info_count = sum(1 for i in all_issues if i.get("severity") == "info")
 
-    # Calculate score based on weighted deductions with logarithmic scaling
-    # Cap critical/warning at 20 each to prevent scores from hitting 0 easily
-    capped_critical = min(critical_count, 20)
-    capped_warning = min(warning_count, 20)
-    capped_info = min(info_count, 30)
+    # ── Hybrid Scoring Formula (Option 3) ──
+    # Formula: score = 100 - (critical × 2.5) - (log(1 + warning) × 2) - (log(1 + info) × 0.5)
+    # This scales fairly: critical issues have direct penalty, warnings/info use logarithmic scaling
+    # so papers with 150+ warnings score lower than those with 50-70, but without harsh cliffs
+    critical_penalty = critical_count * 2.5
+    warning_penalty = math.log(1 + warning_count) * 2
+    info_penalty = math.log(1 + info_count) * 0.5
     
-    # Reduced weights: less harsh penalty per issue
-    score = 100 - (capped_critical * 3) - (capped_warning * 1) - (capped_info * 0.3)
+    score_value = 100 - critical_penalty - warning_penalty - info_penalty
+    score = f"{max(0, score_value):.2f}"
     
     summary = {
         "total":    len(all_issues),
         "critical": critical_count,
         "warning":  warning_count,
         "info":     info_count,
-        "score":    max(0, score)  # Ensure score doesn't go below 0
+        "score":    score  # Score formatted as xxx.xx
     }
 
     return jsonify({
@@ -259,24 +265,63 @@ def analyze():
 
 
 # =============================================================================
-# ROUTE: Generate Report [PLACEHOLDER — report_generator.py is WIP]
+# ROUTE: Generate Report
 # =============================================================================
 
 @app.route("/api/generate-report", methods=["POST"])
 def generate_report():
     """
-    Step 3 — Generate a downloadable PDF/HTML report.
+    Step 3 — Generate and download summary report PDF.
 
-    NOTE: report_generator.py is being built by Member 5.
-    This endpoint returns 501 until that module is ready.
-    Once ready, Member 5 should:
-        1. Import their function here
-        2. Replace the body of this function with the actual report logic
+    Request body (JSON):
+        {
+            "results": { ...analysis results from /api/analyze... },
+            "paper_name": str (optional, default: "ResearchPaper")
+        }
+
+    Response:
+        PDF file (summary report with all findings, suggestions, and score)
     """
-    return jsonify({
-        "status":  "not_implemented",
-        "message": "report_generator.py is under development by Member 5. Check back soon.",
-    }), 501
+    # ── Validate uploaded PDF exists ──
+    if not os.path.exists(UPLOADED_PDF):
+        return jsonify({
+            "error": "No uploaded PDF found. Please upload a PDF first via POST /api/upload."
+        }), 400
+
+    # ── Parse request ──
+    body = request.get_json(silent=True) or {}
+    results = body.get("results")
+    paper_name = body.get("paper_name", "ResearchPaper")
+
+    if not results:
+        return jsonify({"error": "Missing 'results' in request body."}), 400
+
+    try:
+        # ── Generate summary report PDF only ──
+        from modules.report_generator import generate_summary_report_pdf
+        
+        summary_path = os.path.join(
+            OUTPUTS_DIR, 
+            f"analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        )
+        generate_summary_report_pdf(results, summary_path, paper_name)
+
+        # ── Send PDF file to user ──
+        return send_file(
+            summary_path,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name='analysis_report.pdf'
+        )
+
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"\n[ERROR] Failed to generate report:\n{error_trace}\n")
+        return jsonify({
+            "error": f"Failed to generate report: {str(e)}",
+            "traceback": error_trace
+        }), 500
 
 
 # =============================================================================
