@@ -79,10 +79,25 @@ APA_REF_ENTRY_PATTERN = re.compile(r"(?:^|\s)[A-Z][A-Za-z\-]+,\s+[A-Z].*?\(\d{4}
 # "References list" are rejected:
 #   (?=\s*(?:\n|$))   — look-ahead: only spaces/tabs before newline or EOS
 
-_REF_HEADING_RE = re.compile(
-    r"(?:(?:^|\n)\s*)(?P<heading>References|Bibliography|Works\s+Cited)(?=\s*(?:\n|$))",
-    re.IGNORECASE,
+# ---------------------------------------------------------------------------
+# Heading detection — two-pass, handles both newline-joined and space-joined text
+# ---------------------------------------------------------------------------
+# Pass 1 (strict): exact capitalisation at line start — handles newline-joined spans
+#   Matches "REFERENCES" or "References" on its own line.
+#   Does NOT use re.IGNORECASE so lowercase "references" mid-sentence is ignored.
+# Pass 2 (fallback): all-caps word boundary — handles space-joined span text
+#   "REFERENCES" as a standalone token (IEEE all-caps heading style).
+
+_REF_HEADING_STRICT = re.compile(
+    r"(?:(?:^|\n)\s*)(?P<heading>REFERENCES|References|BIBLIOGRAPHY|Bibliography|Works\s+Cited)(?=\s*(?:\n|$))",
 )
+
+_REF_HEADING_FALLBACK = re.compile(
+    r"(?<!\w)(?P<heading>REFERENCES|BIBLIOGRAPHY|Works\s+Cited)(?=\s*(?:\[\d+\]|[A-Z][A-Za-z\-]+,|$))",
+)
+
+# Keep _REF_HEADING_RE as an alias so any existing callers still work
+_REF_HEADING_RE = _REF_HEADING_STRICT
 
 
 # ---------------------------------------------------------------------------
@@ -141,22 +156,92 @@ def _find_page_for_text(parsed_document: list | None, search_text: str) -> int |
     return None
 
 
+def _normalize_heading_token(text: str) -> str:
+    """Lowercase and strip non-letters so OCR/noisy heading tokens are comparable."""
+    return re.sub(r"[^a-z]+", "", (text or "").lower())
+
+
+def _is_heading_case(text: str) -> bool:
+    """Accept heading-like casing (all caps/title case), reject plain lowercase prose."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    alpha_only = re.sub(r"[^A-Za-z\s]", "", stripped).strip()
+    if not alpha_only:
+        return False
+    return alpha_only.isupper() or alpha_only.istitle() or ":" in stripped
+
+
+def _find_references_start_in_spans(parsed_document: list | None) -> int | None:
+    """Find the span index where a References/Bibliography heading starts."""
+    if not parsed_document:
+        return None
+
+    for idx, span in enumerate(parsed_document):
+        raw = (span.get("text") or "").strip()
+        if not raw or len(raw) > 60:
+            continue
+
+        compact = _normalize_heading_token(raw)
+        if compact in {"references", "bibliography", "workscited"} and _is_heading_case(raw):
+            return idx
+
+        if compact == "works" and idx + 1 < len(parsed_document):
+            nxt = (parsed_document[idx + 1].get("text") or "").strip()
+            if _normalize_heading_token(nxt) == "cited" and (_is_heading_case(raw) or _is_heading_case(nxt)):
+                return idx
+
+    return None
+
+
+def _join_span_texts(spans: list[dict]) -> str:
+    """Rebuild text from spans with newline separators to preserve heading/entry boundaries."""
+    lines = []
+    for span in spans:
+        text = (span.get("text") or "").strip()
+        if text:
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def _split_body_and_references(full_text: str, parsed_document: list | None = None) -> tuple[str, str]:
+    """
+    Split document text into (body_text, references_text).
+
+    Primary path uses raw spans because app.py space-joins span text, which can
+    hide heading boundaries needed for reliable References detection.
+    """
+    if parsed_document:
+        start_idx = _find_references_start_in_spans(parsed_document)
+        if start_idx is not None:
+            body = _join_span_texts(parsed_document[:start_idx])
+            refs = _join_span_texts(parsed_document[start_idx:])
+            return body, refs
+
+    text = full_text or ""
+    match = _REF_HEADING_STRICT.search(text)
+    if not match:
+        match = _REF_HEADING_FALLBACK.search(text)
+    if match:
+        return text[:match.start()], text[match.start():]
+
+    return text, ""
+
+
 # ---------------------------------------------------------------------------
 # Helper: extract the References section text  (FIX 1 applied here)
 # ---------------------------------------------------------------------------
 
-def _get_references_section(full_text: str) -> str:
+def _get_references_section(full_text: str, parsed_document: list | None = None) -> str:
     """
     Return the portion of full_text from the 'References' heading onwards.
     Returns empty string if no References section is found.
 
-    FIX: Uses _REF_HEADING_RE which requires the heading to be on its own
-    line, preventing false matches on phrases like "entry in References list."
+    Uses span-aware splitting when parsed_document is available (recommended),
+    then falls back to regex search on full_text.
     """
-    match = _REF_HEADING_RE.search(full_text)
-    if match:
-        return full_text[match.start():]
-    return ""
+    _, ref_section = _split_body_and_references(full_text, parsed_document)
+    return ref_section
 
 
 # ---------------------------------------------------------------------------
@@ -186,11 +271,31 @@ def _expand_ieee_token(token: str) -> list[int]:
     return sorted(set(result))
 
 
+def detect_elsevier_style(full_text: str) -> str:
+    """
+    Heuristically detect Elsevier in-text citation style.
+
+    Returns:
+        - "NUMERIC" when IEEE-style [n] citations are more frequent
+        - "AUTHOR_YEAR" when APA-style (Author, Year) citations are as frequent or more frequent
+        - "UNKNOWN" when neither style is detected
+    """
+    text = full_text or ""
+    ieee_matches = IEEE_PATTERN.findall(text)
+    apa_matches = APA_PATTERN.findall(text)
+
+    if len(ieee_matches) == 0 and len(apa_matches) == 0:
+        return "UNKNOWN"
+    if len(ieee_matches) > len(apa_matches):
+        return "NUMERIC"
+    return "AUTHOR_YEAR"
+
+
 # ---------------------------------------------------------------------------
 # IEEE numeric style checks
 # ---------------------------------------------------------------------------
 
-def _check_ieee_style(full_text: str) -> list[dict]:
+def _check_ieee_style(full_text: str, parsed_document: list | None = None) -> list[dict]:
     """
     Validate IEEE numeric citation style.
 
@@ -204,13 +309,8 @@ def _check_ieee_style(full_text: str) -> list[dict]:
     """
     issues = []
 
-    # Split body vs references using the FIXED heading detector.
-    ref_section = _get_references_section(full_text)
-    if ref_section:
-        ref_match = _REF_HEADING_RE.search(full_text)
-        body_text = full_text[:ref_match.start()]
-    else:
-        body_text = full_text
+    # Split body vs references with span-aware handling (robust to space-joined text).
+    body_text, ref_section = _split_body_and_references(full_text, parsed_document)
 
     # --- Check 1: any IEEE citations in the body? ---
     tokens = IEEE_PATTERN.findall(body_text)
@@ -259,8 +359,9 @@ def _check_ieee_style(full_text: str) -> list[dict]:
     # Fix: only count [n] when it is immediately followed by an author name
     # (capital letter after the bracket), which is the IEEE entry format:
     #   [1] A. Vaswani, ...
-    # Pattern: optional whitespace, [digits], whitespace, capital letter
-    IEEE_REAL_ENTRY_RE = re.compile(r"(?:^|\n)\s*\[(\d+)\]\s+[A-Z]", re.MULTILINE)
+    # Pattern: boundary, [digits], whitespace, capital letter.
+    # Accepts both newline-joined and space-joined reference text.
+    IEEE_REAL_ENTRY_RE = re.compile(r"(?:^|\n|\s)\[(\d+)\]\s+[A-Z]", re.MULTILINE)
     ref_numbers = sorted(set(int(n) for n in IEEE_REAL_ENTRY_RE.findall(ref_section)))
 
     if not ref_numbers:
@@ -331,7 +432,7 @@ def _check_ieee_style(full_text: str) -> list[dict]:
 # APA / author-year style checks
 # ---------------------------------------------------------------------------
 
-def _check_apa_style(full_text: str) -> list[dict]:
+def _check_apa_style(full_text: str, parsed_document: list | None = None) -> list[dict]:
     """Validate APA author-year citation style."""
     issues = []
 
@@ -363,7 +464,7 @@ def _check_apa_style(full_text: str) -> list[dict]:
             severity="info",
         ))
 
-    ref_section = _get_references_section(full_text)
+    ref_section = _get_references_section(full_text, parsed_document)
     if ref_section:
         apa_entries = APA_REF_ENTRY_PATTERN.findall(ref_section)
         if not apa_entries:
@@ -427,7 +528,7 @@ def _check_reference_quality(
 ) -> list[dict]:
     """Light-weight checks on the overall quality of the reference list."""
     issues = []
-    ref_section = _get_references_section(full_text)
+    ref_section = _get_references_section(full_text, parsed_document)
     if not ref_section:
         return issues
 
@@ -559,7 +660,7 @@ def _extract_ieee_reference_titles(ref_section: str, max_refs: int = 10) -> list
     """
     # Only match lines that look like:  [1] A. Author, "Title...",
     # i.e. [digits] followed by whitespace and a capital letter (author initial)
-    IEEE_REAL_ENTRY_RE = re.compile(r"(?:^|\n)\s*\[(\d+)\]\s+[A-Z]", re.MULTILINE)
+    IEEE_REAL_ENTRY_RE = re.compile(r"(?:^|\n|\s)\[(\d+)\]\s+[A-Z]", re.MULTILINE)
 
     # Split on real entry boundaries only
     entries = IEEE_REAL_ENTRY_RE.split(ref_section)
@@ -593,11 +694,12 @@ def _extract_ieee_reference_titles(ref_section: str, max_refs: int = 10) -> list
 
 def _check_references_via_crossref(
     full_text: str,
+    parsed_document: list | None = None,
     max_to_check: int = 8,
 ) -> list[dict]:
     """Verify a sample of IEEE-style references against the Crossref database."""
     issues = []
-    ref_section = _get_references_section(full_text)
+    ref_section = _get_references_section(full_text, parsed_document)
     if not ref_section:
         return issues
 
@@ -672,11 +774,20 @@ def check_citations(
 
     # 1. Venue-specific citation style check
     if std in {"IEEE", "CVPR", "ICCV"}:
-        issues.extend(_check_ieee_style(full_text))
-    elif std in {"APA", "SPRINGER", "ELSEVIER"}:
-        issues.extend(_check_apa_style(full_text))
+        issues.extend(_check_ieee_style(full_text, parsed_document))
+    elif std in {"APA", "SPRINGER"}:
+        issues.extend(_check_apa_style(full_text, parsed_document))
+    elif std == "ELSEVIER":
+        detected = detect_elsevier_style(full_text)
+        if detected == "NUMERIC":
+            issues.extend(_check_ieee_style(full_text, parsed_document))
+        elif detected == "AUTHOR_YEAR":
+            issues.extend(_check_apa_style(full_text, parsed_document))
+        else:
+            print("Elsevier style could not be auto-detected; falling back to generic consistency check.")
+            issues.extend(_check_citation_consistency(full_text))
     elif std == "ACL":
-        issues.extend(_check_apa_style(full_text))
+        issues.extend(_check_apa_style(full_text, parsed_document))
     elif std in {"NEURIPS", "ICML", "AAAI"}:
         issues.extend(_check_citation_consistency(full_text))
     else:
@@ -689,10 +800,10 @@ def check_citations(
 
     # 3. Crossref API verification
     if use_crossref and std in {"IEEE", "CVPR", "ICCV"}:
-        issues.extend(_check_references_via_crossref(full_text))
+        issues.extend(_check_references_via_crossref(full_text, parsed_document))
 
     # 4. Universal: References section must exist
-    if not _get_references_section(full_text):
+    if not _get_references_section(full_text, parsed_document):
         issues.append(_build_issue(
             issue_id="citation-no-references-section",
             message="No 'References' section heading found in the document.",
