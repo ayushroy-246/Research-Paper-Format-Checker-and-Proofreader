@@ -1,7 +1,11 @@
 """
 format_checker.py
 ─────────────────────────────────────────────────────────────────────────────
-Single-file module for all formatting and structure checks.
+Single-file module for PDF layout and structural formatting checks.
+
+This module focuses on venue/template compliance (geometry, typography,
+sections, captions, and equations). Linguistic/readability checks are handled
+in grammar_checker.py.
 
 Pipeline position:
     pdf_ingestion.py  →  [format_checker.py]  →  grammar_checker.py
@@ -458,18 +462,6 @@ def _check_abstract_rules(
     if not abstract:
         return issues
 
-    max_words = rules.get("abstract_max_words")
-    if max_words:
-        wc = len(re.findall(r"\b\w+\b", abstract))
-        if wc > int(max_words):
-            issues.append(_issue(
-                issue_id   = "abstract-word-count",
-                severity   = "warning",
-                page       = None,
-                message    = f"Abstract has ~{wc} words, above {standard_key} limit of {max_words}.",
-                suggestion = "Shorten the abstract to fit the word limit.",
-            ))
-
     if rules.get("abstract_single_paragraph"):
         paras = [b for b in re.split(r"\n\s*\n", abstract) if b.strip()]
         if len(paras) > 1:
@@ -681,39 +673,7 @@ def _check_figure_table_conventions(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 9.  SENTENCE LENGTH CHECK
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _check_sentence_length(parsed_document: dict) -> list[dict]:
-    MAX_WORDS = 60
-    full_text = parsed_document.get("full_text", "")
-    if not full_text:
-        return []
-    sentences = re.split(r"(?<=[.!?])\s+", full_text)
-    long_sents: list[tuple[int, str]] = []
-    for sent in sentences:
-        words = sent.split()
-        if MAX_WORDS < len(words) < 500:
-            long_sents.append((len(words), sent.strip()))
-    if not long_sents:
-        return []
-    long_sents.sort(reverse=True)
-    issues = []
-    for count, example in long_sents[:5]:
-        snippet = (example[:120] + "…") if len(example) > 120 else example
-        issues.append(_issue(
-            issue_id   = f"sentence-too-long-{count}w",
-            severity   = "info",
-            page       = None,
-            message    = f"Very long sentence ({count} words): \"{snippet}\"",
-            suggestion = "Consider splitting sentences over 60 words for clarity.",
-            category   = "readability",
-        ))
-    return issues
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# 10.  UNLABELLED EQUATION CHECK
+# 9.  UNLABELLED EQUATION CHECK
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _check_unlabelled_equations(parsed_document: dict) -> list[dict]:
@@ -747,7 +707,7 @@ def _check_unlabelled_equations(parsed_document: dict) -> list[dict]:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 11.  MAIN ORCHESTRATOR
+# 10.  MAIN ORCHESTRATOR
 # ═════════════════════════════════════════════════════════════════════════════
 
 def check_formatting(
@@ -799,7 +759,6 @@ def check_formatting(
                 iss["severity"] = "info"
     issues.extend(fig_table)
 
-    issues.extend(_check_sentence_length(parsed_document))
     issues.extend(_check_unlabelled_equations(parsed_document))
 
     issues.sort(key=lambda e: (e["page"] if e["page"] is not None else 9999, e["id"]))
@@ -807,7 +766,7 @@ def check_formatting(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 12.  ONE-SHOT HELPER FOR FLASK ROUTES
+# 11.  ONE-SHOT HELPER FOR FLASK ROUTES
 # ═════════════════════════════════════════════════════════════════════════════
 
 def run_format_check(
@@ -867,7 +826,7 @@ def run_format_check(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 13.  QUICK CLI TEST
+# 12.  QUICK CLI TEST
 # ═════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
