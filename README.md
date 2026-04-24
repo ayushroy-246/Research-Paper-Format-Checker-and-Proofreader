@@ -21,15 +21,12 @@ Research-Paper-Format-Checker-and-Proofreader/
 │   ├── requirements.txt       # Python dependencies
 │   ├── configs/               # Configuration files
 │   │   ├── format_rules.py
-│   │   ├── ieee_config.json
-│   │   └── springer_config.json
 │   ├── modules/               # Core functionality
 │   │   ├── pdf_ingestion.py     # PDF extraction and parsing
 │   │   ├── grammar_checker.py   # Grammar and style analysis
 │   │   ├── format_checker.py    # Format validation
 │   │   ├── citation_checker.py  # Citation verification
 │   │   ├── report_generator.py  # Report creation
-│   │   └── utils.py
 │   ├── outputs/               # Generated outputs
 │   └── tests/                 # Backend tests
 │
@@ -206,14 +203,6 @@ Output will be in `frontend/dist/`
    - Start command: `gunicorn app:app`
    - Environment variables: Add required config (FRONTEND_URL, etc.)
 6. Deploy
-
-## Team Roles
-
-- **Member 1**: PDF Ingestion & Data Extraction
-- **Member 2**: Format Checking & Validation Logic
-- **Member 3**: Grammar & Academic Style Analysis
-- **Member 4**: Citation & Reference Verification
-- **Member 5**: UI/UX & Report Generation
 
 ## Configuration
 

@@ -21,7 +21,6 @@ import os
 import json
 import sys
 import math
-import zipfile
 from datetime import datetime
 
 from flask import Flask, request, jsonify, send_file
@@ -36,7 +35,6 @@ from modules.pdf_ingestion   import extract_structure, save_json
 from modules.grammar_checker import check_grammar
 from modules.format_checker  import run_format_check   # one-shot helper — handles everything internally
 from modules.citation_checker import check_citations
-from modules.report_generator import generate_summary_report_pdf
 
 # ── Load environment variables from .env file ─────────────────────────────────
 load_dotenv()
@@ -302,7 +300,7 @@ def generate_report():
         
         summary_path = os.path.join(
             OUTPUTS_DIR, 
-            f"analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            "analysis_report.pdf"
         )
         generate_summary_report_pdf(results, summary_path, paper_name)
 
