@@ -214,12 +214,6 @@ Edit `backend/configs/format_rules.py` to customize:
 - Font and spacing standards
 - Heading styles
 
-### IEEE & Springer Standards
-
-Configuration files:
-- `backend/configs/ieee_config.json`
-- `backend/configs/springer_config.json`
-
 ## Contributing
 
 1. Create a feature branch
