@@ -8,13 +8,13 @@ Pipeline:
               →  POST /api/analyze  →  grammar_checker (Member 3)
                                     →  format_checker  (Member 2)
                                     →  citation_checker(Member 4)
-              →  POST /api/generate-report  →  report_generator (Member 5) [WIP]
+              →  POST /api/generate-report  →  report_generator (Member 5) 
 
 API Endpoints:
     GET  /api/health          → server health check
     POST /api/upload          → upload PDF, extract structure, save outputs
     POST /api/analyze         → run all checks on the uploaded PDF
-    POST /api/generate-report → generate final report [placeholder — WIP]
+    POST /api/generate-report → generate final report
 """
 
 import os
