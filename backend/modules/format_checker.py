@@ -4,7 +4,7 @@ format_checker.py
 Single-file module for PDF layout and structural formatting checks.
 
 This module focuses on venue/template compliance (geometry, typography,
-sections, captions, and equations). Linguistic/readability checks are handled
+sections, and equations). Linguistic/readability checks are handled
 in grammar_checker.py.
 
 Pipeline position:
@@ -33,18 +33,32 @@ except ModuleNotFoundError:
 # REGEX PATTERNS
 # ─────────────────────────────────────────────────────────────────────────────
 
-FIGURE_CAPTION_RE = re.compile(
-    r"^\s*(Figure|Fig\.)\s*([0-9]+)\b\s*[:\.]?", re.IGNORECASE
-)
-TABLE_CAPTION_RE = re.compile(
-    r"^\s*Table\s*([0-9]+|[IVXLC]+)\b\s*[:\.]?", re.IGNORECASE
-)
-IN_TEXT_FIGURE_RE = re.compile(r"\bFigure\s+([0-9]+)\b")
-IN_TEXT_FIG_RE    = re.compile(r"\bFig\.\s*([0-9]+)\b")
-IN_TEXT_TABLE_RE  = re.compile(r"\bTable\s+([0-9]+|[IVXLC]+)\b")
 EQUATION_LABEL_RE = re.compile(r"\((\d+)\)\s*$", re.MULTILINE)
 IN_TEXT_EQ_RE = re.compile(
     r"\b(?:Eq\.|equation|Equation)\s*\((\d+)\)", re.IGNORECASE
+)
+
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+LAB_ORG_RE = re.compile(
+    r"\b(university|institute|department|laboratory|lab\.?|"
+    r"centre|center|school of|college of)\b",
+    re.IGNORECASE,
+)
+INSTITUTIONAL_CLAIM_RE = re.compile(
+    r"\b(?:we|our)\s+(?:lab(?:oratory)?|group|team|department|"
+    r"university|institute|institution)\b",
+    re.IGNORECASE,
+)
+
+DOI_RE = re.compile(r"\b(?:doi:\s*)?10\.\d{4,9}/\S+", re.IGNORECASE)
+COPYRIGHT_RE = re.compile(
+    r"(?:©|\(c\)|copyright)\s*(?:19|20)\d{2}|all rights reserved|published by",
+    re.IGNORECASE,
+)
+PUBLISHED_HEADER_RE = re.compile(
+    r"\b(ieee|association for computational linguistics|acl anthology|"
+    r"springer|elsevier|neurips|cvpr|icml|aaai|proceedings)\b",
+    re.IGNORECASE,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,8 +71,8 @@ SECTION_ALIASES: dict[str, list[str]] = {
     "references":   ["references", "bibliography"],
     "conclusion":   ["conclusion", "conclusions"],
     "discussion":   ["discussion", "results and discussion"],
-    "method":       ["method", "methods", "methodology", "approach"],
-    "result":       ["result", "results", "experiments", "evaluation"],
+    "method":       ["method", "methods", "methodology", "approach", "our approach", "experimental setup", "model", "system architecture"],
+    "result":       ["result", "results", "experiments", "evaluation", "analysis", "findings"],
     "limitations":  ["limitations", "limitation"],
     "checklist":    ["checklist", "paper checklist", "reproducibility checklist"],
     "keywords":     ["keywords", "index terms", "key words"],
@@ -68,6 +82,15 @@ SECTION_ORDER = [
     "abstract", "introduction", "method",
     "result", "discussion", "conclusion", "references",
 ]
+
+SECTION_FLOW_SYNONYMS: dict[str, list[str]] = {
+    "method": [
+        "method", "approach", "model", "methodology", "system", "proposed", "setup",
+    ],
+    "result": [
+        "result", "evaluation", "analysis", "experiment", "findings",
+    ],
+}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -128,6 +151,62 @@ def _last_main_content_page(parsed_document: dict) -> int:
     return int(parsed_document.get("page_count", 1))
 
 
+def _is_likely_published_paper(parsed_document: dict) -> bool:
+    if bool(parsed_document.get("is_published_paper", False)):
+        return True
+
+    pages = parsed_document.get("pages", []) or []
+    first_page = pages[0] if pages else {}
+    first_page_lines = first_page.get("lines", []) or []
+    if first_page_lines:
+        first_page_text = "\n".join((ln.get("text") or "") for ln in first_page_lines[:80])
+    else:
+        first_page_text = (parsed_document.get("full_text", "") or "")[:4000]
+
+    return bool(PUBLISHED_HEADER_RE.search(first_page_text))
+
+
+def _normalize_submission_type(paper_type: str | None) -> str:
+    raw = (paper_type or "").strip().lower().replace("-", "_")
+    if not raw:
+        return "standard"
+
+    mapping = {
+        "conference": "conference",
+        "conference_submission": "conference",
+        "journal": "journal",
+        "journal_submission": "journal",
+        "preprint": "preprint",
+        "arxiv": "preprint",
+    }
+    return mapping.get(raw, "standard")
+
+
+def _normalize_review_mode(review_mode: str | None, parsed_document: dict) -> str:
+    raw = (review_mode or "").strip().lower().replace("-", "_")
+    if not raw:
+        if bool(parsed_document.get("is_published_paper", False)):
+            return "published"
+        return "camera_ready"
+
+    mapping = {
+        "blind": "blind",
+        "double_blind": "blind",
+        "anonymous": "blind",
+        "camera_ready": "camera_ready",
+        "camera": "camera_ready",
+        "published": "published",
+    }
+    return mapping.get(raw, "camera_ready")
+
+
+def _resolve_margin_tolerance(rules: dict, submission_type: str) -> float:
+    submission_types = rules.get("submission_types", {})
+    type_key = submission_type if submission_type in submission_types else "conference"
+    nested = submission_types.get(type_key, {})
+    return float(nested.get("margin_tolerance", rules.get("tolerance_pts", 7.2)))
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 3.  GEOMETRY CHECKS
 # ═════════════════════════════════════════════════════════════════════════════
@@ -171,7 +250,7 @@ def _check_page_size(
 
 
 def _check_margins(
-    page: dict, rules: dict, is_lenient: bool
+    page: dict, rules: dict, is_lenient: bool, margin_tolerance: float | None = None
 ) -> list[dict]:
     spans = page.get("spans", [])
     if not spans:
@@ -210,8 +289,10 @@ def _check_margins(
         "bottom": page["height"] - y1_max,
     }
 
-    base_tol  = float(rules.get("tolerance_pts", 7.2))
+    base_tol  = float(margin_tolerance if margin_tolerance is not None else rules.get("tolerance_pts", 7.2))
     tolerance = max(base_tol * 2, 10.0) if is_lenient else base_tol
+    if rules.get("ignore_positional_headers"):
+        tolerance += 10.0
 
     issues = []
     for side in ("left", "top", "right", "bottom"):
@@ -365,14 +446,30 @@ def _check_required_sections(
     return issues
 
 
-def _check_section_order(parsed_document: dict) -> list[dict]:
+def _check_section_order(
+    parsed_document: dict,
+    is_published: bool = False,
+    standard_key: str | None = None,
+) -> list[dict]:
+    if is_published:
+        return []
+
+    disable_result_before_method = (standard_key or "").upper() == "ACL"
+
     found: dict[str, int] = {}
     for page in parsed_document.get("pages", []):
         pn = page.get("page_number", 0)
         for line in page.get("heading_candidates", []):
             text = line.get("text", "").lower()
+            text_tokens = set(re.findall(r"[a-z]+", text))
             for section in SECTION_ORDER:
-                if any(a in text for a in SECTION_ALIASES.get(section, [section])):
+                flow_aliases = SECTION_FLOW_SYNONYMS.get(section)
+                if flow_aliases is not None:
+                    matched = any(alias in text_tokens for alias in flow_aliases)
+                else:
+                    matched = any(a in text for a in SECTION_ALIASES.get(section, [section]))
+
+                if matched:
                     rank = pn * 10_000 + int((line.get("bbox") or [0, 0, 0, 0])[1])
                     if section not in found or rank < found[section]:
                         found[section] = rank
@@ -380,6 +477,8 @@ def _check_section_order(parsed_document: dict) -> list[dict]:
 
     ordered = [s for s in SECTION_ORDER if s in found]
     for i in range(1, len(ordered)):
+        if disable_result_before_method and ordered[i - 1] == "method" and ordered[i] == "result":
+            continue
         if found[ordered[i]] < found[ordered[i - 1]]:
             return [_issue(
                 issue_id   = "structure-order",
@@ -511,165 +610,70 @@ def _check_blind_review(
     return []
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 8.  FIGURE / TABLE CHECKS
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _normalise_table_num(raw: str) -> str:
-    v = raw.strip().upper()
-    return str(int(v)) if v.isdigit() else v
-
-
-def _is_tabular_line(text: str) -> bool:
-    tokens = text.split()
-    nums   = len(re.findall(r"\b\d+(?:\.\d+)?\b", text))
-    seps   = text.count("|") + text.count("&")
-    gaps   = len(re.findall(r"\s{2,}", text))
-    return len(tokens) >= 3 and (nums >= 2 or seps >= 2 or gaps >= 2)
+def _front_matter_text(parsed_document: dict) -> str:
+    pages = parsed_document.get("pages", []) or []
+    if pages:
+        first_page = pages[0]
+        lines = first_page.get("lines", [])
+        if lines:
+            ordered = sorted(lines, key=lambda ln: ((ln.get("bbox") or [0, 0, 0, 0])[1], (ln.get("bbox") or [0, 0, 0, 0])[0]))
+            collected = "\n".join((ln.get("text") or "").strip() for ln in ordered)
+            return collected[:3000]
+    return (parsed_document.get("full_text", "") or "")[:3000]
 
 
-def _check_figure_table_conventions(
-    parsed_document: dict, standard_key: str, is_lenient: bool
-) -> list[dict]:
+def _check_anonymity(parsed_document: dict) -> list[dict]:
+    """Blind-review helper: detect likely author-identifying signals in front matter."""
     issues: list[dict] = []
-    full_text = parsed_document.get("full_text", "")
-    pages     = parsed_document.get("pages", [])
+    front = _front_matter_text(parsed_document)
+    front_lower = front.lower()
 
-    figure_captions: list[dict] = []
-    table_captions:  list[dict] = []
-
-    for page in pages:
-        pnum = page.get("page_number")
-        for line in page.get("lines", []):
-            text = (line.get("text") or "").strip()
-            if not text:
-                continue
-            fm = FIGURE_CAPTION_RE.match(text)
-            if fm:
-                figure_captions.append({
-                    "page": pnum, "label": fm.group(1),
-                    "number": int(fm.group(2)), "bbox": line.get("bbox"), "text": text,
-                })
-                continue
-            tm = TABLE_CAPTION_RE.match(text)
-            if tm:
-                table_captions.append({
-                    "page": pnum, "number": _normalise_table_num(tm.group(1)),
-                    "bbox": line.get("bbox"), "text": text,
-                })
-
-    fig_nums = [c["number"] for c in figure_captions]
-    if fig_nums:
-        uniq = sorted(set(fig_nums))
-        if uniq != list(range(1, max(uniq) + 1)):
-            issues.append(_issue(
-                "figure-numbering-gap", "info", None,
-                "Figure numbering appears non-sequential or has gaps.",
-                "Number figures consecutively (1, 2, 3, …).",
-            ))
-        if len(set(fig_nums)) != len(fig_nums):
-            issues.append(_issue(
-                "figure-numbering-duplicate", "warning", None,
-                "Duplicate figure numbers detected in captions.",
-                "Each figure must have a unique caption number.",
-            ))
-
-    tbl_nums = [c["number"] for c in table_captions]
-    if tbl_nums and len(set(tbl_nums)) != len(tbl_nums):
+    if EMAIL_RE.search(front):
         issues.append(_issue(
-            "table-numbering-duplicate", "warning", None,
-            "Duplicate table numbers detected in captions.",
-            "Each table must have a unique caption number.",
+            issue_id="blind-anonymity-email",
+            severity="warning",
+            page=1,
+            message="Email address detected in front matter for a blind review submission.",
+            suggestion="Remove author email addresses from title/author blocks for blind review.",
         ))
 
-    fig_styles = {c["label"].lower() for c in figure_captions}
-    if len(fig_styles) > 1:
+    if LAB_ORG_RE.search(front):
         issues.append(_issue(
-            "figure-label-mixed", "info", None,
-            "Mixed figure caption labels ('Figure' and 'Fig.') detected.",
-            "Use one style consistently throughout.",
+            issue_id="blind-anonymity-affiliation",
+            severity="warning",
+            page=1,
+            message="Institution or laboratory name detected in front matter.",
+            suggestion="Anonymise affiliations (institution/lab/department names) for blind review.",
         ))
 
-    word_refs   = len(IN_TEXT_FIGURE_RE.findall(full_text))
-    abbrev_refs = len(IN_TEXT_FIG_RE.findall(full_text))
-    if word_refs > 0 and abbrev_refs > 0:
+    if INSTITUTIONAL_CLAIM_RE.search(front_lower):
         issues.append(_issue(
-            "figure-reference-mixed", "info", None,
-            "Mixed in-text figure references ('Figure X' and 'Fig. X').",
-            "Use a single in-text reference style.",
+            issue_id="blind-anonymity-institutional-claim",
+            severity="info",
+            page=1,
+            message="Potential institutional self-reference ('we/our ...') detected in front matter.",
+            suggestion="Rephrase institutional self-references to preserve anonymity.",
         ))
-
-    if standard_key in {"IEEE", "CVPR", "ICCV"} and word_refs > abbrev_refs >= 2:
-        issues.append(_issue(
-            "figure-reference-ieee-style", "info", None,
-            "IEEE-family venues prefer 'Fig. X' in running text.",
-            "Replace 'Figure X' with 'Fig. X' for IEEE-style submissions.",
-        ))
-
-    in_text_figs = {
-        int(n) for n in IN_TEXT_FIGURE_RE.findall(full_text)
-    } | {int(n) for n in IN_TEXT_FIG_RE.findall(full_text)}
-    cap_figs = {c["number"] for c in figure_captions}
-    missing_figs = sorted(in_text_figs - cap_figs)
-    if missing_figs:
-        issues.append(_issue(
-            "figure-reference-no-caption",
-            "info" if is_lenient else "warning",
-            None,
-            f"In-text figure reference(s) with no matching caption: {missing_figs[:6]}",
-            "Add the missing figure captions or fix the in-text references.",
-        ))
-
-    in_text_tbls = {_normalise_table_num(n) for n in IN_TEXT_TABLE_RE.findall(full_text)}
-    cap_tbls = {c["number"] for c in table_captions}
-    missing_tbls = sorted(in_text_tbls - cap_tbls)
-    if missing_tbls:
-        issues.append(_issue(
-            "table-reference-no-caption",
-            "info" if is_lenient else "warning",
-            None,
-            f"In-text table reference(s) with no matching caption: {missing_tbls[:6]}",
-            "Add the missing table captions or fix the in-text references.",
-        ))
-
-    if re.search(
-        r"\b(?:figure|fig\.|table)\s+\d+\s+(?:above|below)\b"
-        r"|\b(?:above|below|following)\s+(?:figure|fig\.|table)\b",
-        full_text, re.IGNORECASE,
-    ):
-        issues.append(_issue(
-            "float-directional-reference", "info", None,
-            "Directional float references ('Figure 2 above/below') detected.",
-            "Use stable references like 'Figure 2' without positional words.",
-        ))
-
-    for tc in table_captions:
-        page = next((p for p in pages if p.get("page_number") == tc["page"]), None)
-        if not page:
-            continue
-        cap_y  = (tc.get("bbox") or [0, 0, 0, 0])[1]
-        p_lines = page.get("lines", [])
-        above_tab = any(
-            _is_tabular_line((ln.get("text") or "").strip())
-            for ln in p_lines
-            if 0 < (cap_y - (ln.get("bbox") or [0, 0, 0, 0])[1]) <= 120
-        )
-        below_tab = any(
-            _is_tabular_line((ln.get("text") or "").strip())
-            for ln in p_lines
-            if 0 < ((ln.get("bbox") or [0, 0, 0, 0])[1] - cap_y) <= 120
-        )
-        if above_tab and not below_tab:
-            issues.append(_issue(
-                issue_id   = f"table-caption-placement-{tc['page']}-{tc['number']}",
-                severity   = "info",
-                page       = tc["page"],
-                message    = "Table caption may be placed below the table body.",
-                suggestion = "Most venues require table captions above the table.",
-                location   = {"bbox": tc.get("bbox")},
-            ))
 
     return issues
+
+
+def _check_archival_data(parsed_document: dict) -> list[dict]:
+    """Published-mode helper: require DOI or archival copyright-style footer text."""
+    text = parsed_document.get("full_text", "") or ""
+    has_doi = bool(DOI_RE.search(text))
+    has_copyright = bool(COPYRIGHT_RE.search(text))
+
+    if has_doi or has_copyright:
+        return []
+
+    return [_issue(
+        issue_id="published-archival-metadata-missing",
+        severity="warning",
+        page=None,
+        message="Published-mode document is missing DOI/copyright archival markers.",
+        suggestion="Include a DOI string and/or archival copyright footer in the published version.",
+    )]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -719,11 +723,17 @@ def check_formatting(
     standard_key = (standard or "IEEE").upper()
     rules        = get_standard(standard_key) or STANDARDS.get("IEEE", {})
 
-    strict    = (paper_type or "").strip().lower() == "conference_submission"
-    published = (review_mode or "").strip().lower() == "published" or bool(
+    submission_type = _normalize_submission_type(paper_type)
+    normalized_review_mode = _normalize_review_mode(review_mode, parsed_document)
+    review_mode_cfg = (rules.get("review_modes") or {}).get(normalized_review_mode, {})
+    published_by_header = _is_likely_published_paper(parsed_document)
+
+    strict = submission_type in {"conference", "journal"}
+    published = normalized_review_mode == "published" or bool(
         parsed_document.get("is_published_paper", False)
-    )
-    is_lenient = published
+    ) or published_by_header
+    is_lenient = published or submission_type == "preprint"
+    margin_tolerance = _resolve_margin_tolerance(rules, submission_type)
 
     pages          = parsed_document.get("pages", [])
     last_main_page = _last_main_content_page(parsed_document)
@@ -737,7 +747,7 @@ def check_formatting(
     if strict:
         for page in geo_pages:
             issues.extend(_check_page_size(page, rules, standard_key, is_lenient))
-            issues.extend(_check_margins(page, rules, is_lenient))
+            issues.extend(_check_margins(page, rules, is_lenient, margin_tolerance))
             issues.extend(_check_columns(page, rules, standard_key))
 
     if strict:
@@ -748,16 +758,15 @@ def check_formatting(
     issues.extend(
         _check_required_sections(parsed_document, rules, standard_key, strict, published)
     )
-    issues.extend(_check_section_order(parsed_document))
+    issues.extend(_check_section_order(parsed_document, is_published=published, standard_key=standard_key))
     issues.extend(_check_abstract_rules(parsed_document, rules, standard_key))
-    issues.extend(_check_blind_review(parsed_document, rules, standard_key, review_mode))
 
-    fig_table = _check_figure_table_conventions(parsed_document, standard_key, is_lenient)
-    if published:
-        for iss in fig_table:
-            if iss["severity"] == "warning":
-                iss["severity"] = "info"
-    issues.extend(fig_table)
+    if review_mode_cfg.get("anonymity_required", normalized_review_mode == "blind"):
+        issues.extend(_check_blind_review(parsed_document, rules, standard_key, normalized_review_mode))
+        issues.extend(_check_anonymity(parsed_document))
+
+    if review_mode_cfg.get("archival_metadata_required", normalized_review_mode == "published"):
+        issues.extend(_check_archival_data(parsed_document))
 
     issues.extend(_check_unlabelled_equations(parsed_document))
 

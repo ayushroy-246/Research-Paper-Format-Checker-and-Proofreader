@@ -1,1606 +1,4 @@
-# # """
-# # modules/grammar_checker.py
-# # ==========================
-# # 3-layer grammar & academic-style checker for the AI-Powered Research Paper Checker.
-
-# # Public API
-# # ----------
-# #     check_grammar(parsed_data: dict | list) -> list[dict]
-# #     assemble_doc_from_spans(spans: list[dict]) -> dict
-
-# # Layers
-# # ------
-# #     Layer 1  –  Heuristics     (pure Python / regex, zero external deps)
-# #     Layer 2  –  LanguageTool   (Java NLP, singleton, retry-once, graceful degradation)
-# #     Layer 3  –  Academic style (original contribution)
-
-# # Issue schema — every issue returned has exactly these keys
-# # ----------------------------------------------------------
-# #     {
-# #         "id":         str,               # e.g. "grammar-lt-MORFOLOGIK_RULE"
-# #         "category":   "grammar",
-# #         "severity":   "critical" | "warning" | "info",
-# #         "page":       int | None,
-# #         "snippet":    str | None,        # exact text fragment where issue was found
-# #         "message":    str,
-# #         "suggestion": str,
-# #     }
-
-# # Architecture notes
-# # ------------------
-# # - check_grammar() iterates parsed_doc page-by-page so every issue carries an
-# #   accurate page number from the source.  _find_page_for_snippet() is kept as a
-# #   fallback for the LanguageTool layer where offset-based page lookup is needed.
-# # - Singleton pattern: LanguageTool JVM is started once per session and reused.
-# #   On first failure a single retry fires after a 2-second pause; on second
-# #   failure _lt_failed is set and Layer 2 is silently skipped for the session.
-# # - _normalize_for_grammar() runs once per page before all three layers, removing
-# #   citations, equations, URLs, and DOIs to prevent false positives.
-# # - NOISY_LT_RULE_IDS blocklist suppresses rules that fire constantly on
-# #   technical/academic text.
-# # - LanguageTool output is capped at _LT_MAX_ISSUES (12) per page.
-# # """
-
-# # from __future__ import annotations
-
-# # import logging
-# # import re
-# # from typing import Any
-
-# # logger = logging.getLogger(__name__)
-
-# # # ---------------------------------------------------------------------------
-# # # Constants
-# # # ---------------------------------------------------------------------------
-
-# # NOISY_LT_RULE_IDS: set[str] = {
-# #     "WHITESPACE_RULE",
-# #     "DOUBLE_PUNCTUATION",
-# #     "COMMA_PARENTHESIS_WHITESPACE",
-# #     "EN_QUOTES",
-# #     "DASH_RULE",
-# #     "UPPERCASE_SENTENCE_START",
-# #     "PUNCTUATION_PARAGRAPH_END",
-# #     "SENTENCE_WHITESPACE",
-# #     "MORFOLOGIK_RULE_EN_US",
-# #     "EN_UNPAIRED_BRACKETS",
-# #     "ARROWS",
-# #     "UNLIKELY_OPENING_PUNCTUATION",
-# #     "REPEATED_WORDS_3X",
-# # }
-
-# # # Normalizer compiled patterns
-# # _REF_SECTION_RE   = re.compile(r'\b(references|bibliography)\b.*',
-# #                                 re.IGNORECASE | re.DOTALL)
-# # _DOI_RE           = re.compile(r'\bdoi:\s*\S+', re.IGNORECASE)
-# # _URL_RE           = re.compile(r'https?://\S+')
-# # _EQUATION_RE      = re.compile(r'\$[^$]+\$|\\\([^)]+\\\)|\\\[[^\]]+\\\]')
-# # _CITATION_TAG_RE  = re.compile(r'\[[\d,\-\s]+\]|\([A-Za-z\s]+,\s\d{4}\)')
-# # _TABLE_CAPTION_RE = re.compile(r'\b(table|figure|fig\.?)\s+\d+', re.IGNORECASE)
-# # _MATH_TOKENS_RE   = re.compile(r'[=<>≤≥±×÷∑∫∂√∞]')
-
-# # # Layer 1 – heuristic patterns
-# # _REPEATED_WORD_RE = re.compile(r'\b(\w+)\s+\1\b', re.IGNORECASE)
-# # _REPEATED_WORD_ALLOWLIST: set[str] = {"had", "that"}
-
-# # _CONTRACTION_RE = re.compile(
-# #     r"\b(can't|won't|don't|doesn't|didn't|isn't|aren't|wasn't|weren't|"
-# #     r"it's|i'm|i've|i'd|i'll|we're|we've|we'd|we'll|you're|they're|"
-# #     r"he's|she's|that's|there's|here's|let's|who's|what's)\b",
-# #     re.IGNORECASE,
-# # )
-# # _CONTRACTION_EXPANSIONS: dict[str, str] = {
-# #     "can't":   "cannot",
-# #     "won't":   "will not",
-# #     "don't":   "do not",
-# #     "doesn't": "does not",
-# #     "didn't":  "did not",
-# #     "isn't":   "is not",
-# #     "aren't":  "are not",
-# #     "wasn't":  "was not",
-# #     "weren't": "were not",
-# #     "it's":    "it is / its",
-# #     "i'm":     "I am",
-# #     "i've":    "I have",
-# #     "i'd":     "I would / I had",
-# #     "i'll":    "I will",
-# #     "we're":   "we are",
-# #     "we've":   "we have",
-# #     "we'd":    "we would / we had",
-# #     "we'll":   "we will",
-# #     "you're":  "you are",
-# #     "they're": "they are",
-# #     "he's":    "he is / he has",
-# #     "she's":   "she is / she has",
-# #     "that's":  "that is / that has",
-# #     "there's": "there is / there has",
-# #     "here's":  "here is",
-# #     "let's":   "let us",
-# #     "who's":   "who is / who has",
-# #     "what's":  "what is / what has",
-# # }
-
-# # _FIRST_PERSON_RE = re.compile(r'\b(I|me|my|myself|we|our|ours|ourselves)\b')
-
-# # # Layer 3 – academic style patterns
-# # _SUBJECTIVE_FP_RE = re.compile(
-# #     r'\b(I believe|In my opinion|As I have shown|I think|I feel|'
-# #     r'In my view|I argue that|I claim that)\b',
-# #     re.IGNORECASE,
-# # )
-# # _OVERCONFIDENT_RE = re.compile(
-# #     r'\b(proves?|guarantees?|demonstrates? conclusively|shows? definitively|'
-# #     r'undeniably|certainly|it is clear that|clearly shows?|obviously|'
-# #     r'without (any )?doubt|it is evident that|unquestionably)\b',
-# #     re.IGNORECASE,
-# # )
-# # _SUPERLATIVE_RE = re.compile(
-# #     r'\b(the\s+)?(best|worst|fastest|slowest|most\s+accurate|most\s+efficient|'
-# #     r'most\s+effective|most\s+advanced|state-of-the-art|unprecedented|'
-# #     r'superior to all|outperforms? all|novel(?!\w))\b',
-# #     re.IGNORECASE,
-# # )
-# # _VAGUE_QUANTIFIER_RE = re.compile(
-# #     r'\b(many|few|several|some|a number of|various|numerous|a lot of|'
-# #     r'most|majority of|large amount of|small amount of)\b',
-# #     re.IGNORECASE,
-# # )
-# # _MISSING_HEDGE_RE = re.compile(
-# #     r'\b(this\s+(model|method|approach|system|algorithm|framework|technique)'
-# #     r'\s+(is|works|performs|achieves|provides|yields|produces|improves))\b',
-# #     re.IGNORECASE,
-# # )
-# # _HEDGE_WORDS_RE = re.compile(
-# #     r'\b(suggests?|indicates?|appears?\s+to|seems?\s+to|may|might|could|'
-# #     r'is likely|tends?\s+to|is expected to)\b',
-# #     re.IGNORECASE,
-# # )
-# # _ACTIVE_PASSIVE_RE = re.compile(
-# #     r'\b(we\s+(found|observed|note|conclude|believe|claim|argue|show|propose|'
-# #     r'present|demonstrate|evaluate|compare|analyse|analyze))\b',
-# #     re.IGNORECASE,
-# # )
-# # _METHOD_RESULT_KWS_RE = re.compile(
-# #     r'\b(experiment|evaluation|dataset|baseline|results?|training|testing|'
-# #     r'validation|accuracy|performance|benchmark)\b',
-# #     re.IGNORECASE,
-# # )
-
-# # _LT_MAX_ISSUES = 12
-
-# # # ---------------------------------------------------------------------------
-# # # Module-level singleton state
-# # # ---------------------------------------------------------------------------
-# # _lt_tool: Any | None = None
-# # _lt_failed: bool = False
-
-
-# # # ===========================================================================
-# # # Private helpers
-# # # ===========================================================================
-
-# # def _build_issue(
-# #     *,
-# #     id: str,
-# #     severity: str,
-# #     page: int | None,
-# #     snippet: str | None,        # ← NEW: the exact text fragment flagged
-# #     message: str,
-# #     suggestion: str,
-# # ) -> dict:
-# #     """
-# #     Construct a validated issue dict.
-# #     Single source of truth for the issue schema — all layers call this.
-# #     snippet is trimmed to 120 chars max so it stays readable in the UI.
-# #     """
-# #     if snippet:
-# #         snippet = snippet.strip()[:120]
-# #     return {
-# #         "id":         id,
-# #         "category":   "grammar",
-# #         "severity":   severity,
-# #         "page":       page,
-# #         "snippet":    snippet,
-# #         "message":    message,
-# #         "suggestion": suggestion,
-# #     }
-
-
-# # def _get_tool():
-# #     """Return the LanguageTool singleton (retry-once on failure)."""
-# #     global _lt_tool, _lt_failed
-
-# #     if _lt_failed:
-# #         return None
-# #     if _lt_tool is not None:
-# #         return _lt_tool
-
-# #     import time
-
-# #     for attempt in (1, 2):
-# #         try:
-# #             import language_tool_python    # noqa: PLC0415
-# #             logger.info(
-# #                 "[INFO] Starting LanguageTool Java Server (attempt %d/2)...", attempt
-# #             )
-# #             _lt_tool = language_tool_python.LanguageTool("en-US")
-# #             logger.info("[INFO] LanguageTool ready.")
-# #             return _lt_tool
-# #         except Exception as exc:           # noqa: BLE001
-# #             logger.warning(
-# #                 "[ERROR] LanguageTool attempt %d/2 failed: %s", attempt, exc
-# #             )
-# #             if attempt == 1:
-# #                 time.sleep(2)
-
-# #     _lt_failed = True
-# #     logger.warning(
-# #         "[ERROR] LanguageTool unavailable after 2 attempts -- "
-# #         "Layer 2 will be skipped for the remainder of this session."
-# #     )
-# #     return None
-
-
-# # def _find_page_for_snippet(snippet: str, parsed_doc: dict) -> int | None:
-# #     """Fallback page locator: scans all pages for the first one containing snippet."""
-# #     if not snippet or not isinstance(parsed_doc, dict):
-# #         return None
-# #     snippet_lower = snippet.lower().strip()
-# #     for page in parsed_doc.get("pages", []):
-# #         if snippet_lower in (page.get("text") or "").lower():
-# #             return page.get("page_number")
-# #     return None
-
-
-# # def _normalize_for_grammar(text: str) -> str:
-# #     """Strip non-prose content (refs, equations, URLs, citations) before analysis."""
-# #     text = _REF_SECTION_RE.sub(" ", text)
-# #     text = _DOI_RE.sub(" ", text)
-# #     text = _URL_RE.sub(" ", text)
-# #     text = _EQUATION_RE.sub(" ", text)
-# #     text = _CITATION_TAG_RE.sub(" ", text)
-# #     text = _TABLE_CAPTION_RE.sub(" ", text)
-# #     text = _MATH_TOKENS_RE.sub(" ", text)
-# #     text = re.sub(r'[ \t]{2,}', ' ', text)
-# #     return text.strip()
-
-
-# # # ===========================================================================
-# # # Layer 1 – Heuristic checks
-# # # ===========================================================================
-
-# # def _heuristic_checks(text: str, page: int | None) -> list[dict]:
-# #     issues: list[dict] = []
-
-# #     # 1. Repeated words
-# #     for match in _REPEATED_WORD_RE.finditer(text):
-# #         word = match.group(1).lower()
-# #         if word in _REPEATED_WORD_ALLOWLIST:
-# #             continue
-# #         issues.append(_build_issue(
-# #             id         = "grammar-heuristic-repeated-word",
-# #             severity   = "warning",
-# #             page       = page,
-# #             snippet    = match.group(0),            # e.g. "the the"
-# #             message    = f"Repeated word detected: '{word} {word}'.",
-# #             suggestion = f"Remove one occurrence of '{word}'.",
-# #         ))
-
-# #     # 2. Long sentences
-# #     for sentence in re.split(r'(?<=[.?!])\s+', text):
-# #         words = sentence.split()
-# #         if len(words) > 45:
-# #             # Show first 100 chars of the sentence as the locator snippet
-# #             issues.append(_build_issue(
-# #                 id         = "grammar-heuristic-long-sentence",
-# #                 severity   = "info",
-# #                 page       = page,
-# #                 snippet    = sentence[:100],
-# #                 message    = f"Sentence is {len(words)} words long (recommended max: 45).",
-# #                 suggestion = "Break into two or more shorter sentences for clarity.",
-# #             ))
-
-# #     # 3. Contractions
-# #     seen_contractions: set[str] = set()
-# #     for match in _CONTRACTION_RE.finditer(text):
-# #         form = match.group(0).lower()
-# #         if form in seen_contractions:
-# #             continue
-# #         seen_contractions.add(form)
-# #         expansion = _CONTRACTION_EXPANSIONS.get(form, "full form")
-# #         issues.append(_build_issue(
-# #             id         = "grammar-heuristic-contraction",
-# #             severity   = "warning",
-# #             page       = page,
-# #             snippet    = match.group(0),            # e.g. "can't"
-# #             message    = f"Informal contraction '{match.group(0)}' is inappropriate in academic writing.",
-# #             suggestion = f"Expand to '{expansion}'.",
-# #         ))
-
-# #     # 4. First-person pronouns
-# #     seen_fp: set[str] = set()
-# #     for match in _FIRST_PERSON_RE.finditer(text):
-# #         token = match.group(0).lower()
-# #         if token in seen_fp:
-# #             continue
-# #         seen_fp.add(token)
-# #         issues.append(_build_issue(
-# #             id         = "grammar-heuristic-first-person",
-# #             severity   = "warning",
-# #             page       = page,
-# #             snippet    = match.group(0),            # e.g. "We"
-# #             message    = f"First-person pronoun '{match.group(0)}' found.",
-# #             suggestion = (
-# #                 "Use passive voice or third-person constructions "
-# #                 "(e.g. 'The experiment was conducted...' instead of 'We conducted...')."
-# #             ),
-# #         ))
-
-# #     return issues
-
-
-# # # ===========================================================================
-# # # Layer 2 – LanguageTool
-# # # ===========================================================================
-
-# # def _languagetool_checks(text: str, page: int | None) -> list[dict]:
-# #     tool = _get_tool()
-# #     if tool is None:
-# #         return []
-
-# #     try:
-# #         matches = tool.check(text)
-# #     except Exception as exc:
-# #         logger.warning("grammar_checker: LanguageTool.check() failed: %s", exc)
-# #         return []
-
-# #     issues: list[dict] = []
-# #     for match in matches:
-# #         if len(issues) >= _LT_MAX_ISSUES:
-# #             break
-
-# #         rule_id = getattr(match, "ruleId", "") or "general"
-# #         if rule_id in NOISY_LT_RULE_IDS:
-# #             continue
-
-# #         issue_type = getattr(match, "ruleIssueType", "") or ""
-# #         severity   = "critical" if issue_type == "misspelling" else "warning"
-
-# #         replacements = getattr(match, "replacements", []) or []
-# #         suggestion   = (
-# #             f"Try: {', '.join(replacements[:2])}"
-# #             if replacements
-# #             else "Review sentence structure."
-# #         )
-
-# #         # Extract the exact flagged token from LT's context + offset
-# #         context  = getattr(match, "context", "") or ""
-# #         offset   = getattr(match, "offsetInContext", 0) or 0
-# #         length   = getattr(match, "errorLength", 1) or 1
-# #         snippet  = context[offset: offset + length].strip() if context else None
-
-# #         issues.append(_build_issue(
-# #             id         = f"grammar-lt-{rule_id.lower()}",
-# #             severity   = severity,
-# #             page       = page,
-# #             snippet    = snippet,                   # e.g. "recieve"
-# #             message    = getattr(match, "message", "LanguageTool flagged an issue."),
-# #             suggestion = suggestion,
-# #         ))
-
-# #     return issues
-
-
-# # # ===========================================================================
-# # # Layer 3 – Academic style checks
-# # # ===========================================================================
-
-# # def _academic_style_checks(text: str, page: int | None) -> list[dict]:
-# #     issues: list[dict] = []
-
-# #     # 1. Subjective first-person phrases
-# #     seen_sfp: set[str] = set()
-# #     for match in _SUBJECTIVE_FP_RE.finditer(text):
-# #         token = match.group(0).lower()
-# #         if token in seen_sfp:
-# #             continue
-# #         seen_sfp.add(token)
-# #         issues.append(_build_issue(
-# #             id         = "grammar-style-subjective-first-person",
-# #             severity   = "warning",
-# #             page       = page,
-# #             snippet    = match.group(0),            # e.g. "I believe"
-# #             message    = f"Subjective first-person phrasing: '{match.group(0)}'.",
-# #             suggestion = "Rewrite objectively (e.g. 'The results indicate...').",
-# #         ))
-
-# #     # 2. Overconfident claims
-# #     seen_oc: set[str] = set()
-# #     for match in _OVERCONFIDENT_RE.finditer(text):
-# #         token = match.group(0).lower()
-# #         if token in seen_oc:
-# #             continue
-# #         seen_oc.add(token)
-# #         issues.append(_build_issue(
-# #             id         = "grammar-academic-overconfident-claim",
-# #             severity   = "critical",
-# #             page       = page,
-# #             snippet    = match.group(0),            # e.g. "clearly shows"
-# #             message    = (
-# #                 f"Overconfident language: '{match.group(0)}'. "
-# #                 "Academic claims must be appropriately qualified."
-# #             ),
-# #             suggestion = (
-# #                 "Replace with hedged language such as 'suggests', 'indicates', "
-# #                 "'appears to', or 'may demonstrate'."
-# #             ),
-# #         ))
-
-# #     # 3. Unsupported superlatives
-# #     seen_sup: set[str] = set()
-# #     for match in _SUPERLATIVE_RE.finditer(text):
-# #         token = match.group(0).lower().strip()
-# #         if token in seen_sup:
-# #             continue
-# #         seen_sup.add(token)
-# #         issues.append(_build_issue(
-# #             id         = "grammar-academic-unsupported-superlative",
-# #             severity   = "warning",
-# #             page       = page,
-# #             snippet    = match.group(0).strip(),    # e.g. "the best"
-# #             message    = (
-# #                 f"Superlative or absolute claim: '{match.group(0).strip()}'. "
-# #                 "This requires explicit comparative evidence or a citation."
-# #             ),
-# #             suggestion = (
-# #                 "Either cite evidence for the claim or use a relative comparative "
-# #                 "(e.g. 'outperforms the baseline' instead of 'the best')."
-# #             ),
-# #         ))
-
-# #     # 4. Vague quantifiers
-# #     seen_vq: set[str] = set()
-# #     for match in _VAGUE_QUANTIFIER_RE.finditer(text):
-# #         token = match.group(0).lower()
-# #         if token in seen_vq:
-# #             continue
-# #         seen_vq.add(token)
-# #         issues.append(_build_issue(
-# #             id         = "grammar-academic-vague-quantifier",
-# #             severity   = "info",
-# #             page       = page,
-# #             snippet    = match.group(0),            # e.g. "many"
-# #             message    = f"Vague quantifier '{match.group(0)}' lacks precision.",
-# #             suggestion = (
-# #                 "Replace with a specific number or percentage where possible "
-# #                 "(e.g. '47 participants' instead of 'many participants')."
-# #             ),
-# #         ))
-
-# #     # 5. Missing hedging
-# #     for match in _MISSING_HEDGE_RE.finditer(text):
-# #         start  = max(0, match.start() - 60)
-# #         end    = min(len(text), match.end() + 60)
-# #         window = text[start:end]
-# #         if not _HEDGE_WORDS_RE.search(window):
-# #             issues.append(_build_issue(
-# #                 id         = "grammar-academic-missing-hedge",
-# #                 severity   = "warning",
-# #                 page       = page,
-# #                 snippet    = match.group(0),        # e.g. "this method performs"
-# #                 message    = (
-# #                     f"Unhedged claim: '{match.group(0)}'. "
-# #                     "Direct assertions without qualification are discouraged."
-# #                 ),
-# #                 suggestion = (
-# #                     "Add hedging language, e.g. 'This method appears to...' "
-# #                     "or 'The proposed approach may...'."
-# #                 ),
-# #             ))
-
-# #     # 6. Active voice in methods / results context
-# #     seen_av: set[str] = set()
-# #     for match in _ACTIVE_PASSIVE_RE.finditer(text):
-# #         phrase = match.group(0).lower()
-# #         if phrase in seen_av:
-# #             continue
-# #         sent_start = text.rfind('.', 0, match.start()) + 1
-# #         sent_end   = text.find('.', match.end())
-# #         if sent_end == -1:
-# #             sent_end = len(text)
-# #         sentence = text[sent_start:sent_end]
-# #         if _METHOD_RESULT_KWS_RE.search(sentence):
-# #             seen_av.add(phrase)
-# #             issues.append(_build_issue(
-# #                 id         = "grammar-academic-active-voice-methods",
-# #                 severity   = "info",
-# #                 page       = page,
-# #                 snippet    = match.group(0),        # e.g. "we found"
-# #                 message    = (
-# #                     f"Active voice ('{match.group(0)}') in a methods/results context. "
-# #                     "Many venues prefer passive construction here."
-# #                 ),
-# #                 suggestion = (
-# #                     "Consider passive voice, e.g. "
-# #                     "'Experiments were conducted...' instead of 'We conducted...'."
-# #                 ),
-# #             ))
-
-# #     return issues
-
-
-# # # ===========================================================================
-# # # Data Assembler (Bridge from pdf_ingestion)
-# # # ===========================================================================
-
-# # def assemble_doc_from_spans(spans: list[dict]) -> dict:
-# #     """
-# #     BRIDGE FUNCTION:
-# #     Converts the 'List of Spans' from pdf_ingestion.py into the
-# #     'Page-based Dict' required by check_grammar().
-# #     """
-# #     pages_map: dict[int, list[str]] = {}
-
-# #     for span in spans:
-# #         p_num = span.get("page", 1)
-# #         text  = span.get("text", "")
-# #         if p_num not in pages_map:
-# #             pages_map[p_num] = []
-# #         pages_map[p_num].append(text)
-
-# #     return {
-# #         "pages": [
-# #             {"page_number": p_num, "text": " ".join(pages_map[p_num])}
-# #             for p_num in sorted(pages_map.keys())
-# #         ]
-# #     }
-
-
-# # # ===========================================================================
-# # # Public API
-# # # ===========================================================================
-
-# # def check_grammar(parsed_data: dict | list) -> list[dict]:
-# #     """
-# #     Main entry point -- called by app.py / the central orchestrator.
-
-# #     Parameters
-# #     ----------
-# #     parsed_data : dict | list
-# #         If passed a dict, assumes it is already formatted into pages.
-# #         If passed a list, assumes it is the raw 'span' output from
-# #         pdf_ingestion.py and automatically assembles it via
-# #         assemble_doc_from_spans().
-
-# #     Returns
-# #     -------
-# #     list[dict]
-# #         Aggregated issue list across all pages.
-# #         Every issue contains: id, category, severity, page, snippet,
-# #         message, suggestion.
-# #     """
-# #     all_issues: list[dict] = []
-
-# #     # Auto-detect input format
-# #     if isinstance(parsed_data, list):
-# #         parsed_doc = assemble_doc_from_spans(parsed_data)
-# #         logger.info(
-# #             "Auto-assembled %d spans into %d pages.",
-# #             len(parsed_data), len(parsed_doc.get("pages", []))
-# #         )
-# #     else:
-# #         parsed_doc = parsed_data
-
-# #     if not parsed_doc or "pages" not in parsed_doc:
-# #         logger.warning("grammar_checker.check_grammar: empty or malformed parsed_doc.")
-# #         return all_issues
-
-# #     for page_data in parsed_doc.get("pages", []):
-# #         page_num = page_data.get("page_number")
-# #         raw_text = page_data.get("text", "") or ""
-
-# #         if not raw_text.strip():
-# #             continue
-
-# #         clean_text = _normalize_for_grammar(raw_text)
-
-# #         # --- Layer 1 ---
-# #         try:
-# #             layer1 = _heuristic_checks(clean_text, page_num)
-# #             logger.debug("Page %s | Layer 1: %d issues.", page_num, len(layer1))
-# #             all_issues.extend(layer1)
-# #         except Exception as exc:
-# #             logger.error("Page %s | Layer 1 crashed: %s", page_num, exc, exc_info=True)
-
-# #         # --- Layer 2 ---
-# #         try:
-# #             layer2 = _languagetool_checks(clean_text, page_num)
-# #             logger.debug("Page %s | Layer 2: %d issues.", page_num, len(layer2))
-# #             all_issues.extend(layer2)
-# #         except Exception as exc:
-# #             logger.error("Page %s | Layer 2 crashed: %s", page_num, exc, exc_info=True)
-
-# #         # --- Layer 3 ---
-# #         try:
-# #             layer3 = _academic_style_checks(clean_text, page_num)
-# #             logger.debug("Page %s | Layer 3: %d issues.", page_num, len(layer3))
-# #             all_issues.extend(layer3)
-# #         except Exception as exc:
-# #             logger.error("Page %s | Layer 3 crashed: %s", page_num, exc, exc_info=True)
-
-# #     logger.info("grammar_checker: %d total issues across all pages.", len(all_issues))
-# #     return all_issues
-
-# """
-# modules/grammar_checker.py
-# ==========================
-# 3-layer grammar & academic-style checker for the AI-Powered Research Paper Checker.
-
-# Public API
-# ----------
-#     check_grammar(parsed_data: dict | list) -> list[dict]
-#     assemble_doc_from_spans(spans: list[dict]) -> dict
-
-# Layers
-# ------
-#     Layer 1  –  Heuristics     (pure Python / regex, zero external deps)
-#     Layer 2  –  LanguageTool   (Java NLP, singleton, retry-once, graceful degradation)
-#     Layer 3  –  Academic style (original contribution)
-
-# Issue schema — every issue returned has exactly these keys
-# ----------------------------------------------------------
-#     {
-#         "id":         str,
-#         "category":   "grammar",
-#         "severity":   "critical" | "warning" | "info",
-#         "page":       int | None,
-#         "snippet":    str | None,
-#         "message":    str,
-#         "suggestion": str,
-#     }
-
-# Architecture notes
-# ------------------
-# - check_grammar() iterates parsed_doc page-by-page so every issue carries an
-#   accurate page number from the source.
-# - Singleton pattern: LanguageTool JVM started once, retry-once on failure.
-# - _normalize_for_grammar() strips equations, references, math, citations, and
-#   PDF line-break hyphens before any layer sees the text.
-# - NOISY_LT_RULE_IDS suppresses rules that fire constantly on technical text.
-# - LanguageTool output capped at _LT_MAX_ISSUES (12) per page.
-
-# Key fix (v2)
-# ------------
-# - Normalizer now strips PDF line-break hyphens (e.g. "pro-\ncedure" → "procedure")
-# - Normalizer strips isolated single-letter tokens that are math variables
-# - _REPEATED_WORD_RE allowlist extended to cover single-character math vars
-# - Long-sentence check now skips sentences that contain equation residue
-#   (digit-heavy or symbol-heavy strings that PyMuPDF extracts from equations)
-# - First-person check now skips standalone 'I' that appears next to digits or
-#   math symbols (i.e. it is a variable, not a pronoun)
-# - LanguageTool NOISY blocklist extended with rules that fire on technical text
-# """
-
-# from __future__ import annotations
-
-# import logging
-# import re
-# from typing import Any
-
-# logger = logging.getLogger(__name__)
-
-# # ---------------------------------------------------------------------------
-# # Constants
-# # ---------------------------------------------------------------------------
-
-# NOISY_LT_RULE_IDS: set[str] = {
-#     "WHITESPACE_RULE",
-#     "DOUBLE_PUNCTUATION",
-#     "COMMA_PARENTHESIS_WHITESPACE",
-#     "EN_QUOTES",
-#     "DASH_RULE",
-#     "UPPERCASE_SENTENCE_START",
-#     "PUNCTUATION_PARAGRAPH_END",
-#     "SENTENCE_WHITESPACE",
-#     "MORFOLOGIK_RULE_EN_US",          # noisy on acronyms / variable names
-#     "EN_UNPAIRED_BRACKETS",
-#     "ARROWS",
-#     "UNLIKELY_OPENING_PUNCTUATION",
-#     "REPEATED_WORDS_3X",
-#     # Additional rules that fire heavily on equation-rich technical papers
-#     "WORD_CONTAINS_UNDERSCORE",
-#     "UNPAIRED_BRACKETS",
-#     "PUNCTUATION_SPACE",
-#     "COMMA_COMPOUND_SENTENCE",
-#     "AGREEMENT_SENT",
-#     "EN_A_VS_AN",
-#     "NEEDLESS_VARIANT",
-#     "HYPHENATED_WORDS_COMPOUNDS",
-#     "UNNECESSARY_HYPHEN",
-# }
-
-# # ---------------------------------------------------------------------------
-# # Normalizer compiled patterns
-# # ---------------------------------------------------------------------------
-# _REF_SECTION_RE   = re.compile(r'\b(references|bibliography)\b.*',
-#                                 re.IGNORECASE | re.DOTALL)
-# _DOI_RE           = re.compile(r'\bdoi:\s*\S+', re.IGNORECASE)
-# _URL_RE           = re.compile(r'https?://\S+')
-# _EQUATION_RE      = re.compile(r'\$[^$]+\$|\\\([^)]+\\\)|\\\[[^\]]+\\\]')
-# _CITATION_TAG_RE  = re.compile(r'\[[\d,\-\s]+\]|\([A-Za-z\s]+,\s\d{4}\)')
-# _TABLE_CAPTION_RE = re.compile(r'\b(table|figure|fig\.?)\s+\d+', re.IGNORECASE)
-# _MATH_TOKENS_RE   = re.compile(r'[=<>≤≥±×÷∑∫∂√∞α-ωΑ-Ω·°]')
-
-# # PDF line-break hyphens: "pro-\ncedure" or "pro- cedure" → "procedure"
-# # PyMuPDF preserves these as literal hyphen + newline/space
-# _LINEBREAK_HYPHEN_RE = re.compile(r'(\w)-\n(\w)')
-# _LINEBREAK_HYPHEN_SPACE_RE = re.compile(r'(\w)- ([a-z])')
-
-# # Equation residue: lines that are mostly digits, operators, variable tokens
-# # These come from PyMuPDF extracting typeset math as plain text
-# # A "sentence" is equation residue if it has a very high ratio of non-alpha chars
-# def _is_equation_residue(text: str) -> bool:
-#     """Return True if this text looks like extracted equation content, not prose."""
-#     if len(text) < 5:
-#         return True
-#     alpha = sum(1 for c in text if c.isalpha())
-#     ratio = alpha / len(text)
-#     # Less than 40% alphabetic = mostly numbers/symbols = equation
-#     if ratio < 0.40:
-#         return True
-#     # Single-character tokens repeated (e.g. "n n", "x x", "k k")
-#     if re.match(r'^[a-zA-Z]\s+[a-zA-Z]$', text.strip()):
-#         return True
-#     return False
-
-# # ---------------------------------------------------------------------------
-# # Layer 1 – heuristic patterns
-# # ---------------------------------------------------------------------------
-# _REPEATED_WORD_RE = re.compile(r'\b(\w+)\s+\1\b', re.IGNORECASE)
-
-# # Allowlist for valid double-word constructions AND single math variable chars
-# # Single letters as words are almost always math variables in technical papers
-# _REPEATED_WORD_ALLOWLIST: set[str] = {
-#     "had", "that",
-#     # Single-letter math variables that appear doubled in equations
-#     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
-#     "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-# }
-
-# _CONTRACTION_RE = re.compile(
-#     r"\b(can't|won't|don't|doesn't|didn't|isn't|aren't|wasn't|weren't|"
-#     r"it's|i'm|i've|i'd|i'll|we're|we've|we'd|we'll|you're|they're|"
-#     r"he's|she's|that's|there's|here's|let's|who's|what's)\b",
-#     re.IGNORECASE,
-# )
-# _CONTRACTION_EXPANSIONS: dict[str, str] = {
-#     "can't":   "cannot",
-#     "won't":   "will not",
-#     "don't":   "do not",
-#     "doesn't": "does not",
-#     "didn't":  "did not",
-#     "isn't":   "is not",
-#     "aren't":  "are not",
-#     "wasn't":  "was not",
-#     "weren't": "were not",
-#     "it's":    "it is / its",
-#     "i'm":     "I am",
-#     "i've":    "I have",
-#     "i'd":     "I would / I had",
-#     "i'll":    "I will",
-#     "we're":   "we are",
-#     "we've":   "we have",
-#     "we'd":    "we would / we had",
-#     "we'll":   "we will",
-#     "you're":  "you are",
-#     "they're": "they are",
-#     "he's":    "he is / he has",
-#     "she's":   "she is / she has",
-#     "that's":  "that is / that has",
-#     "there's": "there is / there has",
-#     "here's":  "here is",
-#     "let's":   "let us",
-#     "who's":   "who is / who has",
-#     "what's":  "what is / what has",
-# }
-
-# # First-person: match 'I' only when it is a standalone word surrounded by
-# # normal prose characters, NOT when adjacent to digits or math punctuation.
-# # This filters "variable I" (e.g. "J = I × r") from "pronoun I" ("I believe").
-# _FIRST_PERSON_RE = re.compile(r'\b(I|me|my|myself|we|our|ours|ourselves)\b')
-# # Context pattern: if 'I' is surrounded by digits/math it's a variable
-# _MATH_CONTEXT_RE = re.compile(r'[\d\+\-\*/\^=,\(\)\[\]\.]\s*I\s*[\d\+\-\*/\^=,\(\)\[\]\.]')
-
-# # ---------------------------------------------------------------------------
-# # Layer 3 – academic style patterns
-# # ---------------------------------------------------------------------------
-# _SUBJECTIVE_FP_RE = re.compile(
-#     r'\b(I believe|In my opinion|As I have shown|I think|I feel|'
-#     r'In my view|I argue that|I claim that)\b',
-#     re.IGNORECASE,
-# )
-# _OVERCONFIDENT_RE = re.compile(
-#     r'\b(proves?|guarantees?|demonstrates? conclusively|shows? definitively|'
-#     r'undeniably|certainly|it is clear that|clearly shows?|obviously|'
-#     r'without (any )?doubt|it is evident that|unquestionably)\b',
-#     re.IGNORECASE,
-# )
-# _SUPERLATIVE_RE = re.compile(
-#     r'\b(the\s+)?(best|worst|fastest|slowest|most\s+accurate|most\s+efficient|'
-#     r'most\s+effective|most\s+advanced|state-of-the-art|unprecedented|'
-#     r'superior to all|outperforms? all|novel(?!\w))\b',
-#     re.IGNORECASE,
-# )
-# _VAGUE_QUANTIFIER_RE = re.compile(
-#     r'\b(many|few|several|some|a number of|various|numerous|a lot of|'
-#     r'most|majority of|large amount of|small amount of)\b',
-#     re.IGNORECASE,
-# )
-# _MISSING_HEDGE_RE = re.compile(
-#     r'\b(this\s+(model|method|approach|system|algorithm|framework|technique)'
-#     r'\s+(is|works|performs|achieves|provides|yields|produces|improves))\b',
-#     re.IGNORECASE,
-# )
-# _HEDGE_WORDS_RE = re.compile(
-#     r'\b(suggests?|indicates?|appears?\s+to|seems?\s+to|may|might|could|'
-#     r'is likely|tends?\s+to|is expected to)\b',
-#     re.IGNORECASE,
-# )
-# _ACTIVE_PASSIVE_RE = re.compile(
-#     r'\b(we\s+(found|observed|note|conclude|believe|claim|argue|show|propose|'
-#     r'present|demonstrate|evaluate|compare|analyse|analyze))\b',
-#     re.IGNORECASE,
-# )
-# _METHOD_RESULT_KWS_RE = re.compile(
-#     r'\b(experiment|evaluation|dataset|baseline|results?|training|testing|'
-#     r'validation|accuracy|performance|benchmark)\b',
-#     re.IGNORECASE,
-# )
-
-# _LT_MAX_ISSUES = 12
-
-# # ---------------------------------------------------------------------------
-# # Module-level singleton state
-# # ---------------------------------------------------------------------------
-# _lt_tool: Any | None = None
-# _lt_failed: bool = False
-
-
-# # ===========================================================================
-# # Private helpers
-# # ===========================================================================
-
-# def _build_issue(
-#     *,
-#     id: str,
-#     severity: str,
-#     page: int | None,
-#     snippet: str | None,
-#     message: str,
-#     suggestion: str,
-# ) -> dict:
-#     """Single source of truth for the issue schema."""
-#     if snippet:
-#         snippet = snippet.strip()[:120]
-#     return {
-#         "id":         id,
-#         "category":   "grammar",
-#         "severity":   severity,
-#         "page":       page,
-#         "snippet":    snippet,
-#         "message":    message,
-#         "suggestion": suggestion,
-#     }
-
-
-# def _get_tool():
-#     """Return the LanguageTool singleton (retry-once on failure)."""
-#     global _lt_tool, _lt_failed
-
-#     if _lt_failed:
-#         return None
-#     if _lt_tool is not None:
-#         return _lt_tool
-
-#     import time
-
-#     for attempt in (1, 2):
-#         try:
-#             import language_tool_python    # noqa: PLC0415
-#             logger.info("[INFO] Starting LanguageTool Java Server (attempt %d/2)...", attempt)
-#             _lt_tool = language_tool_python.LanguageTool("en-US")
-#             logger.info("[INFO] LanguageTool ready.")
-#             return _lt_tool
-#         except Exception as exc:           # noqa: BLE001
-#             logger.warning("[ERROR] LanguageTool attempt %d/2 failed: %s", attempt, exc)
-#             if attempt == 1:
-#                 time.sleep(2)
-
-#     _lt_failed = True
-#     logger.warning(
-#         "[ERROR] LanguageTool unavailable after 2 attempts -- "
-#         "Layer 2 will be skipped for the remainder of this session."
-#     )
-#     return None
-
-
-# def _find_page_for_snippet(snippet: str, parsed_doc: dict) -> int | None:
-#     """Fallback page locator."""
-#     if not snippet or not isinstance(parsed_doc, dict):
-#         return None
-#     snippet_lower = snippet.lower().strip()
-#     for page in parsed_doc.get("pages", []):
-#         if snippet_lower in (page.get("text") or "").lower():
-#             return page.get("page_number")
-#     return None
-
-
-# def _is_reference_section_start(text: str) -> bool:
-#     """
-#     NEW: Detect if this page contains a References/Bibliography section HEADING.
-    
-#     Looks for standalone section headers (first few lines) like:
-#       - "References"
-#       - "References:"
-#       - "REFERENCES"
-#       - "Bibliography"
-#       - "Works Cited"
-    
-#     Only checks first 3 lines to avoid false positives from mentions in prose.
-#     Ignores mentions like "see References section" in the middle of text.
-#     """
-#     if not text or not text.strip():
-#         return False
-    
-#     lines = text.strip().split('\n')
-#     ref_keywords = {"references", "bibliography", "works cited", "citations", "cited works"}
-    
-#     # Check only first 3 lines of the page (likely where a section heading appears)
-#     for i, line in enumerate(lines[:3]):
-#         stripped = line.strip().lower()
-        
-#         # Skip very short residue or empty lines
-#         if not stripped or len(stripped) > 50:
-#             continue
-        
-#         # Match standalone keyword (with optional colon or number suffix for numbering)
-#         for keyword in ref_keywords:
-#             # Patterns:
-#             # "References" or "References:" or "References 1" or similar
-#             if re.match(rf'^\s*{keyword}\s*(:|$|[0-9])', stripped, re.IGNORECASE):
-#                 logger.debug(f"Detected reference section heading on line {i}: '{line.strip()}'")
-#                 return True
-    
-#     return False
-
-
-# def _is_likely_acronym_or_name(snippet: str) -> bool:
-#     """
-#     NEW: Filter snippets that are likely acronyms, proper nouns, or technical terms.
-#     Don't flag these as spelling errors since they're domain-specific.
-#     """
-#     if not snippet or len(snippet) < 2:
-#         return False
-    
-#     # All uppercase (acronyms): CNN, BERT, IEEE, LSTM, etc.
-#     if snippet.isupper() and len(snippet) >= 2:
-#         return True
-    
-#     # Contains digits (likely variable/model names): BERT2, ResNet50, etc.
-#     if any(c.isdigit() for c in snippet):
-#         return True
-    
-#     # Contains underscores (likely variable/method names: my_var, __init__)
-#     if '_' in snippet:
-#         return True
-    
-#     # Title case + short (likely proper noun: Smith, John, etc.)
-#     if snippet and snippet[0].isupper() and len(snippet) <= 15:
-#         # In citation context, single words capitalized are often names
-#         return True
-    
-#     return False
-
-
-# # COMMENTED OUT (old version):
-# # def _normalize_for_grammar(text: str) -> str:
-# #     """
-# #     Strip non-prose content before any layer sees the text.
-# #
-# #     Order matters:
-# #     1. Fix PDF line-break hyphens FIRST ("pro-\\ncedure" → "procedure")
-# #     2. Strip References section
-# #     3. Strip DOIs, URLs
-# #     4. Strip LaTeX equations
-# #     5. Strip citation tags
-# #     6. Strip table/figure labels
-# #     7. Strip math operator characters
-# #     8. Collapse whitespace
-# #     """
-# #     # 1. Fix PDF line-break hyphens (PyMuPDF preserves "pro-\ncedure")
-# #     text = _LINEBREAK_HYPHEN_RE.sub(r'\1\2', text)
-# #     text = _LINEBREAK_HYPHEN_SPACE_RE.sub(r'\1\2', text)
-# #
-# #     # 2-7. Standard normalisation
-# #     text = _REF_SECTION_RE.sub(" ", text)
-# #     text = _DOI_RE.sub(" ", text)
-# #     text = _URL_RE.sub(" ", text)
-# #     text = _EQUATION_RE.sub(" ", text)
-# #     text = _CITATION_TAG_RE.sub(" ", text)
-# #     text = _TABLE_CAPTION_RE.sub(" ", text)
-# #     text = _MATH_TOKENS_RE.sub(" ", text)
-# #
-# #     # 8. Collapse whitespace
-# #     text = re.sub(r'[ \t]{2,}', ' ', text)
-# #     return text.strip()
-
-
-# # NEW version (same logic, kept for now):
-# def _normalize_for_grammar(text: str) -> str:
-#     """
-#     Strip non-prose content before any layer sees the text.
-
-#     Order matters:
-#     1. Fix PDF line-break hyphens FIRST ("pro-\\ncedure" → "procedure")
-#     2. Strip References section
-#     3. Strip DOIs, URLs
-#     4. Strip LaTeX equations
-#     5. Strip citation tags
-#     6. Strip table/figure labels
-#     7. Strip math operator characters
-#     8. Collapse whitespace
-#     """
-#     # 1. Fix PDF line-break hyphens (PyMuPDF preserves "pro-\ncedure")
-#     text = _LINEBREAK_HYPHEN_RE.sub(r'\1\2', text)
-#     text = _LINEBREAK_HYPHEN_SPACE_RE.sub(r'\1\2', text)
-
-#     # 2-7. Standard normalisation
-#     text = _REF_SECTION_RE.sub(" ", text)
-#     text = _DOI_RE.sub(" ", text)
-#     text = _URL_RE.sub(" ", text)
-#     text = _EQUATION_RE.sub(" ", text)
-#     text = _CITATION_TAG_RE.sub(" ", text)
-#     text = _TABLE_CAPTION_RE.sub(" ", text)
-#     text = _MATH_TOKENS_RE.sub(" ", text)
-
-#     # 8. Collapse whitespace
-#     text = re.sub(r'[ \t]{2,}', ' ', text)
-#     return text.strip()
-
-
-# # ===========================================================================
-# # Layer 1 – Heuristic checks
-# # ===========================================================================
-
-# def _heuristic_checks(text: str, page: int | None) -> list[dict]:
-#     issues: list[dict] = []
-
-#     # ------------------------------------------------------------------
-#     # 1. Repeated words
-#     #    Skip: allowlisted words (valid doubles + single math var letters)
-#     # ------------------------------------------------------------------
-#     for match in _REPEATED_WORD_RE.finditer(text):
-#         word = match.group(1).lower()
-#         if word in _REPEATED_WORD_ALLOWLIST:
-#             continue
-#         issues.append(_build_issue(
-#             id         = "grammar-heuristic-repeated-word",
-#             severity   = "warning",
-#             page       = page,
-#             snippet    = match.group(0),
-#             message    = f"Repeated word detected: '{word} {word}'.",
-#             suggestion = f"Remove one occurrence of '{word}'.",
-#         ))
-
-#     # ------------------------------------------------------------------
-#     # 2. Long sentences
-#     #    Skip sentences that are equation residue (PyMuPDF math extraction)
-#     # ------------------------------------------------------------------
-#     for sentence in re.split(r'(?<=[.?!])\s+', text):
-#         words = sentence.split()
-#         if len(words) > 45:
-#             # Skip if this "sentence" is actually extracted equation text
-#             if _is_equation_residue(sentence):
-#                 continue
-#             issues.append(_build_issue(
-#                 id         = "grammar-heuristic-long-sentence",
-#                 severity   = "info",
-#                 page       = page,
-#                 snippet    = sentence[:100],
-#                 message    = f"Sentence is {len(words)} words long (recommended max: 45).",
-#                 suggestion = "Break into two or more shorter sentences for clarity.",
-#             ))
-
-#     # ------------------------------------------------------------------
-#     # 3. Contractions
-#     # ------------------------------------------------------------------
-#     seen_contractions: set[str] = set()
-#     for match in _CONTRACTION_RE.finditer(text):
-#         form = match.group(0).lower()
-#         if form in seen_contractions:
-#             continue
-#         seen_contractions.add(form)
-#         expansion = _CONTRACTION_EXPANSIONS.get(form, "full form")
-#         issues.append(_build_issue(
-#             id         = "grammar-heuristic-contraction",
-#             severity   = "warning",
-#             page       = page,
-#             snippet    = match.group(0),
-#             message    = f"Informal contraction '{match.group(0)}' is inappropriate in academic writing.",
-#             suggestion = f"Expand to '{expansion}'.",
-#         ))
-
-#     # ------------------------------------------------------------------
-#     # 4. First-person pronouns
-#     #    Skip standalone 'I' that is a math variable (adjacent to digits/operators)
-#     # ------------------------------------------------------------------
-#     seen_fp: set[str] = set()
-#     for match in _FIRST_PERSON_RE.finditer(text):
-#         token = match.group(0)
-#         token_lower = token.lower()
-
-#         # For the pronoun 'I' specifically, check it's not a math variable
-#         if token == "I":
-#             # Get surrounding context (10 chars each side)
-#             start  = max(0, match.start() - 10)
-#             end    = min(len(text), match.end() + 10)
-#             window = text[start:end]
-#             # If surrounded by math context, skip
-#             if re.search(r'[\d\+\-\*/\^=,\(\)\[\]\.]', window):
-#                 continue
-
-#         if token_lower in seen_fp:
-#             continue
-#         seen_fp.add(token_lower)
-#         issues.append(_build_issue(
-#             id         = "grammar-heuristic-first-person",
-#             severity   = "warning",
-#             page       = page,
-#             snippet    = token,
-#             message    = f"First-person pronoun '{token}' found.",
-#             suggestion = (
-#                 "Use passive voice or third-person constructions "
-#                 "(e.g. 'The experiment was conducted...' instead of 'We conducted...')."
-#             ),
-#         ))
-
-#     return issues
-
-
-# # ===========================================================================
-# # Layer 2 – LanguageTool
-# # ===========================================================================
-
-# # COMMENTED OUT (old version without acronym/name filtering):
-# # def _languagetool_checks(text: str, page: int | None) -> list[dict]:
-# #     tool = _get_tool()
-# #     if tool is None:
-# #         return []
-# #
-# #     try:
-# #         matches = tool.check(text)
-# #     except Exception as exc:
-# #         logger.warning("grammar_checker: LanguageTool.check() failed: %s", exc)
-# #         return []
-# #
-# #     issues: list[dict] = []
-# #     for match in matches:
-# #         if len(issues) >= _LT_MAX_ISSUES:
-# #             break
-# #
-# #         rule_id = getattr(match, "ruleId", "") or "general"
-# #         if rule_id in NOISY_LT_RULE_IDS:
-# #             continue
-# #
-# #         issue_type = getattr(match, "ruleIssueType", "") or ""
-# #         severity   = "critical" if issue_type == "misspelling" else "warning"
-# #
-# #         replacements = getattr(match, "replacements", []) or []
-# #         suggestion   = (
-# #             f"Try: {', '.join(replacements[:2])}"
-# #             if replacements
-# #             else "Review sentence structure."
-# #         )
-# #
-# #         context  = getattr(match, "context", "") or ""
-# #         offset   = getattr(match, "offsetInContext", 0) or 0
-# #         length   = getattr(match, "errorLength", 1) or 1
-# #         snippet  = context[offset: offset + length].strip() if context else None
-# #
-# #         # Skip if snippet looks like a math variable (single letter or digit string)
-# #         if snippet and re.match(r'^[a-zA-Z\d]{1,3}$', snippet):
-# #             continue
-# #
-# #         # Fix: if snippet is just punctuation, use broader context
-# #         if not snippet or snippet in {".", ",", "!", "?", "(", ")"}:
-# #             snippet = context.strip()[:80] if context else None
-# #
-# #         issues.append(_build_issue(
-# #             id         = f"grammar-lt-{rule_id.lower()}",
-# #             severity   = severity,
-# #             page       = page,
-# #             snippet    = snippet,
-# #             message    = getattr(match, "message", "LanguageTool flagged an issue."),
-# #             suggestion = suggestion,
-# #         ))
-# #
-# #     return issues
-
-
-# # NEW version with acronym/name filtering:
-# def _languagetool_checks(text: str, page: int | None) -> list[dict]:
-#     """LanguageTool checks with NEW: filtering of acronyms and names."""
-#     tool = _get_tool()
-#     if tool is None:
-#         return []
-
-#     try:
-#         matches = tool.check(text)
-#     except Exception as exc:
-#         logger.warning("grammar_checker: LanguageTool.check() failed: %s", exc)
-#         return []
-
-#     issues: list[dict] = []
-#     for match in matches:
-#         if len(issues) >= _LT_MAX_ISSUES:
-#             break
-
-#         rule_id = getattr(match, "ruleId", "") or "general"
-#         if rule_id in NOISY_LT_RULE_IDS:
-#             continue
-
-#         issue_type = getattr(match, "ruleIssueType", "") or ""
-#         severity   = "critical" if issue_type == "misspelling" else "warning"
-
-#         replacements = getattr(match, "replacements", []) or []
-#         suggestion   = (
-#             f"Try: {', '.join(replacements[:2])}"
-#             if replacements
-#             else "Review sentence structure."
-#         )
-
-#         context  = getattr(match, "context", "") or ""
-#         offset   = getattr(match, "offsetInContext", 0) or 0
-#         length   = getattr(match, "errorLength", 1) or 1
-#         snippet  = context[offset: offset + length].strip() if context else None
-
-#         # Skip if snippet looks like a math variable (single letter or digit string)
-#         if snippet and re.match(r'^[a-zA-Z\d]{1,3}$', snippet):
-#             continue
-
-#         # NEW: Skip if snippet is likely an acronym, technical term, or proper name
-#         if snippet and _is_likely_acronym_or_name(snippet):
-#             logger.debug(f"Skipping likely acronym/name: {snippet}")
-#             continue
-
-#         # Fix: if snippet is just punctuation, use broader context
-#         if not snippet or snippet in {".", ",", "!", "?", "(", ")"}:
-#             snippet = context.strip()[:80] if context else None
-
-#         issues.append(_build_issue(
-#             id         = f"grammar-lt-{rule_id.lower()}",
-#             severity   = severity,
-#             page       = page,
-#             snippet    = snippet,
-#             message    = getattr(match, "message", "LanguageTool flagged an issue."),
-#             suggestion = suggestion,
-#         ))
-
-#     return issues
-
-
-# # ===========================================================================
-# # Layer 3 – Academic style checks
-# # ===========================================================================
-
-# def _academic_style_checks(text: str, page: int | None) -> list[dict]:
-#     issues: list[dict] = []
-
-#     # 1. Subjective first-person phrases
-#     seen_sfp: set[str] = set()
-#     for match in _SUBJECTIVE_FP_RE.finditer(text):
-#         token = match.group(0).lower()
-#         if token in seen_sfp:
-#             continue
-#         seen_sfp.add(token)
-#         issues.append(_build_issue(
-#             id         = "grammar-style-subjective-first-person",
-#             severity   = "warning",
-#             page       = page,
-#             snippet    = match.group(0),
-#             message    = f"Subjective first-person phrasing: '{match.group(0)}'.",
-#             suggestion = "Rewrite objectively (e.g. 'The results indicate...').",
-#         ))
-
-#     # 2. Overconfident claims
-#     seen_oc: set[str] = set()
-#     for match in _OVERCONFIDENT_RE.finditer(text):
-#         token = match.group(0).lower()
-#         if token in seen_oc:
-#             continue
-#         seen_oc.add(token)
-#         issues.append(_build_issue(
-#             id         = "grammar-academic-overconfident-claim",
-#             severity   = "critical",
-#             page       = page,
-#             snippet    = match.group(0),
-#             message    = (
-#                 f"Overconfident language: '{match.group(0)}'. "
-#                 "Academic claims must be appropriately qualified."
-#             ),
-#             suggestion = (
-#                 "Replace with hedged language such as 'suggests', 'indicates', "
-#                 "'appears to', or 'may demonstrate'."
-#             ),
-#         ))
-
-#     # 3. Unsupported superlatives
-#     seen_sup: set[str] = set()
-#     for match in _SUPERLATIVE_RE.finditer(text):
-#         token = match.group(0).lower().strip()
-#         if token in seen_sup:
-#             continue
-#         seen_sup.add(token)
-#         issues.append(_build_issue(
-#             id         = "grammar-academic-unsupported-superlative",
-#             severity   = "warning",
-#             page       = page,
-#             snippet    = match.group(0).strip(),
-#             message    = (
-#                 f"Superlative or absolute claim: '{match.group(0).strip()}'. "
-#                 "This requires explicit comparative evidence or a citation."
-#             ),
-#             suggestion = (
-#                 "Either cite evidence for the claim or use a relative comparative "
-#                 "(e.g. 'outperforms the baseline' instead of 'the best')."
-#             ),
-#         ))
-
-#     # 4. Vague quantifiers
-#     seen_vq: set[str] = set()
-#     for match in _VAGUE_QUANTIFIER_RE.finditer(text):
-#         token = match.group(0).lower()
-#         if token in seen_vq:
-#             continue
-#         seen_vq.add(token)
-#         issues.append(_build_issue(
-#             id         = "grammar-academic-vague-quantifier",
-#             severity   = "info",
-#             page       = page,
-#             snippet    = match.group(0),
-#             message    = f"Vague quantifier '{match.group(0)}' lacks precision.",
-#             suggestion = (
-#                 "Replace with a specific number or percentage where possible "
-#                 "(e.g. '47 participants' instead of 'many participants')."
-#             ),
-#         ))
-
-#     # 5. Missing hedging
-#     for match in _MISSING_HEDGE_RE.finditer(text):
-#         start  = max(0, match.start() - 60)
-#         end    = min(len(text), match.end() + 60)
-#         window = text[start:end]
-#         if not _HEDGE_WORDS_RE.search(window):
-#             issues.append(_build_issue(
-#                 id         = "grammar-academic-missing-hedge",
-#                 severity   = "warning",
-#                 page       = page,
-#                 snippet    = match.group(0),
-#                 message    = (
-#                     f"Unhedged claim: '{match.group(0)}'. "
-#                     "Direct assertions without qualification are discouraged."
-#                 ),
-#                 suggestion = (
-#                     "Add hedging language, e.g. 'This method appears to...' "
-#                     "or 'The proposed approach may...'."
-#                 ),
-#             ))
-
-#     # 6. Active voice in methods / results context
-#     seen_av: set[str] = set()
-#     for match in _ACTIVE_PASSIVE_RE.finditer(text):
-#         phrase = match.group(0).lower()
-#         if phrase in seen_av:
-#             continue
-#         sent_start = text.rfind('.', 0, match.start()) + 1
-#         sent_end   = text.find('.', match.end())
-#         if sent_end == -1:
-#             sent_end = len(text)
-#         sentence = text[sent_start:sent_end]
-#         if _METHOD_RESULT_KWS_RE.search(sentence):
-#             seen_av.add(phrase)
-#             issues.append(_build_issue(
-#                 id         = "grammar-academic-active-voice-methods",
-#                 severity   = "info",
-#                 page       = page,
-#                 snippet    = match.group(0),
-#                 message    = (
-#                     f"Active voice ('{match.group(0)}') in a methods/results context. "
-#                     "Many venues prefer passive construction here."
-#                 ),
-#                 suggestion = (
-#                     "Consider passive voice, e.g. "
-#                     "'Experiments were conducted...' instead of 'We conducted...'."
-#                 ),
-#             ))
-
-#     return issues
-
-
-# # ===========================================================================
-# # Data Assembler (Bridge from pdf_ingestion)
-# # ===========================================================================
-
-# def assemble_doc_from_spans(spans: list[dict]) -> dict:
-#     """
-#     Convert the flat span list from pdf_ingestion.extract_structure()
-#     into the page-grouped dict required by check_grammar().
-#     """
-#     pages_map: dict[int, list[str]] = {}
-
-#     for span in spans:
-#         p_num = span.get("page", 1)
-#         text  = span.get("text", "")
-#         if p_num not in pages_map:
-#             pages_map[p_num] = []
-#         pages_map[p_num].append(text)
-
-#     return {
-#         "pages": [
-#             {"page_number": p_num, "text": " ".join(pages_map[p_num])}
-#             for p_num in sorted(pages_map.keys())
-#         ]
-#     }
-
-
-# # ===========================================================================
-# # Public API
-# # ===========================================================================
-
-# # COMMENTED OUT (old version without References section skipping):
-# # def check_grammar(parsed_data: dict | list) -> list[dict]:
-# #     """
-# #     Main entry point -- called by app.py / the central orchestrator.
-# #
-# #     Parameters
-# #     ----------
-# #     parsed_data : dict | list
-# #         If a list, assumes raw span output from pdf_ingestion and assembles
-# #         it automatically. If a dict, assumes already page-grouped format.
-# #
-# #     Returns
-# #     -------
-# #     list[dict]
-# #         Aggregated issue list across all pages.
-# #     """
-# #     all_issues: list[dict] = []
-# #
-# #     if isinstance(parsed_data, list):
-# #         parsed_doc = assemble_doc_from_spans(parsed_data)
-# #         logger.info(
-# #             "Auto-assembled %d spans into %d pages.",
-# #             len(parsed_data), len(parsed_doc.get("pages", []))
-# #         )
-# #     else:
-# #         parsed_doc = parsed_data
-# #
-# #     if not parsed_doc or "pages" not in parsed_doc:
-# #         logger.warning("grammar_checker.check_grammar: empty or malformed parsed_doc.")
-# #         return all_issues
-# #
-# #     for page_data in parsed_doc.get("pages", []):
-# #         page_num = page_data.get("page_number")
-# #         raw_text = page_data.get("text", "") or ""
-# #
-# #         if not raw_text.strip():
-# #             continue
-# #
-# #         clean_text = _normalize_for_grammar(raw_text)
-# #
-# #         try:
-# #             layer1 = _heuristic_checks(clean_text, page_num)
-# #             logger.debug("Page %s | Layer 1: %d issues.", page_num, len(layer1))
-# #             all_issues.extend(layer1)
-# #         except Exception as exc:
-# #             logger.error("Page %s | Layer 1 crashed: %s", page_num, exc, exc_info=True)
-# #
-# #         try:
-# #             layer2 = _languagetool_checks(clean_text, page_num)
-# #             logger.debug("Page %s | Layer 2: %d issues.", page_num, len(layer2))
-# #             all_issues.extend(layer2)
-# #         except Exception as exc:
-# #             logger.error("Page %s | Layer 2 crashed: %s", page_num, exc, exc_info=True)
-# #
-# #         try:
-# #             layer3 = _academic_style_checks(clean_text, page_num)
-# #             logger.debug("Page %s | Layer 3: %d issues.", page_num, len(layer3))
-# #             all_issues.extend(layer3)
-# #         except Exception as exc:
-# #             logger.error("Page %s | Layer 3 crashed: %s", page_num, exc, exc_info=True)
-# #
-# #     logger.info("grammar_checker: %d total issues across all pages.", len(all_issues))
-# #     return all_issues
-
-
-# # NEW version with References section detection:
-# def check_grammar(parsed_data: dict | list) -> list[dict]:
-#     """
-#     Main entry point -- called by app.py / the central orchestrator.
-
-#     Parameters
-#     ----------
-#     parsed_data : dict | list
-#         If a list, assumes raw span output from pdf_ingestion and assembles
-#         it automatically. If a dict, assumes already page-grouped format.
-
-#     Returns
-#     -------
-#     list[dict]
-#         Aggregated issue list across all pages.
-#         NEW: Skips grammar checking from the References section onward.
-#     """
-#     all_issues: list[dict] = []
-
-#     if isinstance(parsed_data, list):
-#         parsed_doc = assemble_doc_from_spans(parsed_data)
-#         logger.info(
-#             "Auto-assembled %d spans into %d pages.",
-#             len(parsed_data), len(parsed_doc.get("pages", []))
-#         )
-#     else:
-#         parsed_doc = parsed_data
-
-#     if not parsed_doc or "pages" not in parsed_doc:
-#         logger.warning("grammar_checker.check_grammar: empty or malformed parsed_doc.")
-#         return all_issues
-
-#     # NEW: Track if we've entered the References section
-#     hit_references = False
-
-#     for page_data in parsed_doc.get("pages", []):
-#         page_num = page_data.get("page_number")
-#         raw_text = page_data.get("text", "") or ""
-
-#         if not raw_text.strip():
-#             continue
-
-#         # NEW: Check if this page starts with or contains a References heading
-#         # Once we hit References, skip all further grammar checking
-#         if _is_reference_section_start(raw_text):
-#             logger.info("Page %s | References section detected. Skipping grammar checks for this and subsequent pages.", page_num)
-#             hit_references = True
-
-#         if hit_references:
-#             logger.debug("Page %s | Skipped (in References section).", page_num)
-#             continue
-
-#         clean_text = _normalize_for_grammar(raw_text)
-
-#         try:
-#             layer1 = _heuristic_checks(clean_text, page_num)
-#             logger.debug("Page %s | Layer 1: %d issues.", page_num, len(layer1))
-#             all_issues.extend(layer1)
-#         except Exception as exc:
-#             logger.error("Page %s | Layer 1 crashed: %s", page_num, exc, exc_info=True)
-
-#         try:
-#             layer2 = _languagetool_checks(clean_text, page_num)
-#             logger.debug("Page %s | Layer 2: %d issues.", page_num, len(layer2))
-#             all_issues.extend(layer2)
-#         except Exception as exc:
-#             logger.error("Page %s | Layer 2 crashed: %s", page_num, exc, exc_info=True)
-
-#         try:
-#             layer3 = _academic_style_checks(clean_text, page_num)
-#             logger.debug("Page %s | Layer 3: %d issues.", page_num, len(layer3))
-#             all_issues.extend(layer3)
-#         except Exception as exc:
-#             logger.error("Page %s | Layer 3 crashed: %s", page_num, exc, exc_info=True)
-
-#     logger.info("grammar_checker: %d total issues across all pages.", len(all_issues))
-#     return all_issues
-
-"""
+﻿"""
 modules/grammar_checker.py
 ==========================
 3-layer grammar & academic-style checker for the AI-Powered Research Paper Checker.
@@ -1622,8 +20,6 @@ Issue schema
         "suggestion": str,
     }
 """
-
-from __future__ import annotations
 
 import logging
 import re
@@ -1660,7 +56,7 @@ NOISY_LT_RULE_IDS: set[str] = {
     "UNNECESSARY_HYPHEN",
     # Fires on author names and place names in citations
     "PROPER_NOUN_SPELLING",
-    # Fires on "labour", "organisation" etc. — British vs American variants
+    # Fires on "labour", "organisation" etc. - British vs American variants
     # are style choices, not errors in an international paper
     "BRITISH_ENGLISH_SPELLING",
     "EN_GB_SIMPLE_REPLACE",
@@ -1677,7 +73,7 @@ NOISY_LT_RULE_IDS: set[str] = {
 # ---------------------------------------------------------------------------
 # Normalizer patterns
 # ---------------------------------------------------------------------------
-# References / Bibliography section — strip everything from here on
+# References / Bibliography section - strip everything from here on
 _REF_SECTION_STRICT = re.compile(
     r"(?:(?:^|\n)\s*)(?:REFERENCES|References|BIBLIOGRAPHY|Bibliography|Works\s+Cited)(?=\s*(?:\n|$))",
 )
@@ -1685,7 +81,7 @@ _REF_SECTION_FALLBACK = re.compile(
     r"(?<!\w)(?:REFERENCES|BIBLIOGRAPHY)(?!\s+\w)",
 )
 
-# Acknowledgements section — skip this too (contains first-person "I would like")
+# Acknowledgements section - skip this too (contains first-person "I would like")
 _ACK_SECTION_RE = re.compile(
     r"(?:(?:^|\n)\s*)(?:ACKNOWLEDGEMENT?S?|Acknowledgement?s?)(?=\s*(?:\n|$))",
 )
@@ -1695,7 +91,7 @@ _URL_RE           = re.compile(r'https?://\S+')
 _EQUATION_RE      = re.compile(r'\$[^$]+\$|\\\([^)]+\\\)|\\\[[^\]]+\\\]')
 _CITATION_TAG_RE  = re.compile(r'\[[\d,\-\s]+\]|\([A-Za-z][A-Za-z\s\-&]+,\s*\d{4}[a-z]?\)')
 _TABLE_CAPTION_RE = re.compile(r'\b(table|figure|fig\.?)\s+\d+', re.IGNORECASE)
-_MATH_TOKENS_RE   = re.compile(r'[=<>≤≥±×÷∑∫∂√∞α-ωΑ-Ω·°]')
+_MATH_TOKENS_RE   = re.compile(r'[=<>+\-*/^]')
 
 # PDF line-break hyphens
 _LINEBREAK_HYPHEN_RE       = re.compile(r'(\w)-\n(\w)')
@@ -1883,7 +279,7 @@ def _get_tool():
             if attempt == 1:
                 time.sleep(2)
     _lt_failed = True
-    logger.warning("[ERROR] LanguageTool unavailable — Layer 2 skipped.")
+    logger.warning("[ERROR] LanguageTool unavailable - Layer 2 skipped.")
     return None
 
 
@@ -1962,7 +358,7 @@ def _is_skip_section(text: str) -> bool:
     if not stripped:
         return False
 
-    # Form 1: heading on its own line (primary path — works after the \n fix)
+    # Form 1: heading on its own line (primary path - works after the \n fix)
     if _SKIP_HEADING_RE.search(stripped):
         logger.info("HARD STOP: heading detected in block: %r", stripped[:60])
         return True
@@ -2033,7 +429,7 @@ def _is_non_prose_block(text: str) -> bool:
 
     words = re.findall(r'[A-Za-z]+(?:-[A-Za-z]+)?', stripped)
     numbers = re.findall(r'\b\d+(?:\.\d+)?%?\b', stripped)
-    special_symbols = re.findall(r'[∆%\[\]{}<>_=+^|~]', stripped)
+    special_symbols = re.findall(r'[%\[\]{}<>_=+^|~]', stripped)
     has_sentence_punctuation = bool(re.search(r'[.!?]', stripped))
 
     number_to_word_ratio = len(numbers) / max(len(words), 1)
@@ -2060,7 +456,7 @@ def _table_matrix_metrics(text: str) -> dict[str, float | int | bool]:
     alpha_chars = sum(1 for c in raw if c.isalpha())
     digit_chars = sum(1 for c in raw if c.isdigit())
     newline_chars = raw.count("\n")
-    symbol_chars = len(re.findall(r'[\[\]∆|\\/\-_=+<>%]', raw))
+    symbol_chars = len(re.findall(r'[\[\]|\\/\-_=+<>%]', raw))
     has_sentence_punctuation = bool(re.search(r'[.!?]', raw))
 
     alpha_to_numeric_ratio = alpha_chars / max(digit_chars, 1)
@@ -2360,7 +756,7 @@ def _is_likely_acronym_or_name(word: str | None) -> bool:
     if '_' in word:
         return True
 
-    # Single letter — almost always a variable in academic text
+    # Single letter - almost always a variable in academic text
     if len(word) == 1 and word.isalpha():
         return True
 
@@ -2494,7 +890,7 @@ def _normalize_for_grammar(text: str) -> str:
     Strip non-prose content before any layer sees the text.
 
     Steps:
-    1. Fix PDF line-break hyphens ("pro-\\ncedure" → "procedure")
+    1. Fix PDF line-break hyphens ("pro-\\ncedure" -> "procedure")
     2. Strip page headers/footers (conference name lines)
     3. Strip DOIs, URLs
     4. Strip citation tags
@@ -2525,7 +921,7 @@ def _normalize_for_grammar(text: str) -> str:
 
 
 # ===========================================================================
-# Layer 1 – Heuristic checks
+# Layer 1 - Heuristic checks
 # ===========================================================================
 
 def _heuristic_checks(text: str, page_spans: list[tuple[int, int, int]]) -> list[dict]:
@@ -2563,7 +959,7 @@ def _heuristic_checks(text: str, page_spans: list[tuple[int, int, int]]) -> list
 
 
 # ===========================================================================
-# Layer 2 – LanguageTool
+# Layer 2 - LanguageTool
 # ===========================================================================
 
 def _languagetool_checks(text: str, page_spans: list[tuple[int, int, int]]) -> list[dict]:
@@ -2633,7 +1029,7 @@ def _languagetool_checks(text: str, page_spans: list[tuple[int, int, int]]) -> l
                 logger.debug("Skipping likely acronym/name/citation: %r", word)
                 continue
 
-            # If word is very short (1-3 chars), skip — usually a variable
+            # If word is very short (1-3 chars), skip - usually a variable
             if word and re.match(r'^[a-zA-Z\d]{1,3}$', word):
                 continue
 
@@ -2659,13 +1055,64 @@ def _languagetool_checks(text: str, page_spans: list[tuple[int, int, int]]) -> l
 
 
 # ===========================================================================
-# Layer 3 – Academic style checks
+# Layer 3 - Academic style checks
 # ===========================================================================
 
-def _academic_style_checks(text: str, page: int | None) -> list[dict]:
-    # Layer 3 retained for architecture compatibility, but style checks are disabled
-    # to return grammar-only issues.
-    return []
+def _academic_style_checks(
+    text: str,
+    page_spans: list[tuple[int, int, int]] | None = None,
+) -> list[dict]:
+    """Lenient academic-style checks with high precision and low noise."""
+    issues: list[dict] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for sentence, start, _ in _split_sentences_with_offsets(text):
+        stripped = sentence.strip()
+        if not stripped or len(stripped.split()) < 8:
+            continue
+        if _is_equation_residue(stripped) or _is_non_prose_block(stripped):
+            continue
+
+        lower_sentence = stripped.lower()
+        page = _offset_to_page(start, page_spans) if page_spans else None
+
+        if _OVERCONFIDENT_RE.search(stripped):
+            issue_id = "grammar-style-overconfident-claim"
+            key = (lower_sentence, issue_id)
+            if key not in seen_pairs:
+                severity = "info" if _HEDGE_WORDS_RE.search(stripped) else "warning"
+                issues.append(_build_issue(
+                    id=issue_id,
+                    severity=severity,
+                    page=page,
+                    snippet=stripped[:120],
+                    message="Claim sounds overly certain for academic writing.",
+                    suggestion="Add measured language or cite stronger evidence for this claim.",
+                ))
+                seen_pairs.add(key)
+                if len(issues) >= 5:
+                    break
+
+        if _VAGUE_QUANTIFIER_RE.search(stripped):
+            has_numeric_support = bool(re.search(r"\b\d+(?:\.\d+)?%?\b", stripped))
+            has_citation_support = bool(_CITATION_TAG_RE.search(stripped))
+            if not has_numeric_support and not has_citation_support:
+                issue_id = "grammar-style-vague-quantifier"
+                key = (lower_sentence, issue_id)
+                if key not in seen_pairs:
+                    issues.append(_build_issue(
+                        id=issue_id,
+                        severity="info",
+                        page=page,
+                        snippet=stripped[:120],
+                        message="Vague quantity term found without concrete value or citation.",
+                        suggestion="Use a specific number, proportion, or citation to support the quantity claim.",
+                    ))
+                    seen_pairs.add(key)
+                    if len(issues) >= 5:
+                        break
+
+    return issues
 
 
 def _append_unique_issues(
@@ -2739,7 +1186,7 @@ def check_grammar(parsed_data: dict | list) -> list[dict]:
 
     Returns
     -------
-    list[dict]  — aggregated issues across all body pages.
+    list[dict]  - aggregated issues across all body pages.
     """
     all_issues: list[dict] = []
 
@@ -2789,7 +1236,7 @@ def check_grammar(parsed_data: dict | list) -> list[dict]:
         logger.error("Layer 2 crashed: %s", exc, exc_info=True)
 
     try:
-        layer3 = _academic_style_checks(original_doc_text, None)
+        layer3 = _academic_style_checks(original_doc_text, page_spans)
         logger.debug("Layer 3: %d", len(layer3))
         _append_unique_issues(all_issues, layer3, seen_issues)
     except Exception as exc:

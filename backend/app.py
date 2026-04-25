@@ -21,10 +21,6 @@ import os
 import json
 import sys
 import math
-<<<<<<< HEAD
-=======
-from datetime import datetime
->>>>>>> 628aa949b27c443692fe97049670a597fa19f805
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS  # Cross-Origin Resource Sharing
@@ -237,7 +233,7 @@ def analyze():
     warning_count = sum(1 for i in all_issues if i.get("severity") == "warning")
     info_count = sum(1 for i in all_issues if i.get("severity") == "info")
 
-    # ── Hybrid Scoring Formula (Option 3) ──
+    # ── Hybrid Scoring Formula ──
     # Formula: score = 100 - (critical × 2.5) - (log(1 + warning) × 2) - (log(1 + info) × 0.5)
     # This scales fairly: critical issues have direct penalty, warnings/info use logarithmic scaling
     # so papers with 150+ warnings score lower than those with 50-70, but without harsh cliffs

@@ -130,6 +130,7 @@ STANDARDS = {
         "margin_bottom_pts": 70.866,
         "margin_left_pts":   70.866,
         "margin_right_pts":  70.866,
+        "ignore_positional_headers": True,
         "tolerance_pts": 3.0,
         "tolerance_font_size": 0.5,
         "required_sections": ["abstract", "introduction", "references"],
@@ -287,6 +288,63 @@ STANDARDS = {
         "line_spacing": "single",
     },
 }
+
+
+# ─────────────────────────────────────────────────────────────────
+# Context-aware defaults (submission status / review mode)
+# ─────────────────────────────────────────────────────────────────
+
+DEFAULT_SUBMISSION_TYPE_CONFIG = {
+    "conference": {"margin_tolerance": 7.2},
+    "journal":    {"margin_tolerance": 5.0},
+    "preprint":   {"margin_tolerance": 15.0},
+}
+
+DEFAULT_REVIEW_MODE_CONFIG = {
+    "blind":        {"anonymity_required": True},
+    "camera_ready": {"anonymity_required": False},
+    "published":    {
+        "anonymity_required": False,
+        "archival_metadata_required": True,
+    },
+}
+
+
+def _ensure_context_blocks() -> None:
+    """
+    Ensure each venue standard supports nested context blocks:
+      - submission_types: conference / journal / preprint
+      - review_modes: blind / camera_ready / published
+
+    Existing top-level fields remain unchanged for backward compatibility.
+    """
+    for cfg in STANDARDS.values():
+        base_tol = float(cfg.get("tolerance_pts", 7.2))
+
+        submission_defaults = {
+            "conference": {"margin_tolerance": base_tol},
+            "journal":    {"margin_tolerance": DEFAULT_SUBMISSION_TYPE_CONFIG["journal"]["margin_tolerance"]},
+            "preprint":   {"margin_tolerance": DEFAULT_SUBMISSION_TYPE_CONFIG["preprint"]["margin_tolerance"]},
+        }
+
+        submission_types = cfg.setdefault("submission_types", {})
+        for key, defaults in submission_defaults.items():
+            existing = submission_types.get(key, {})
+            submission_types[key] = {**defaults, **existing}
+
+        # Alias used by existing callers.
+        submission_types.setdefault("conference_submission", submission_types["conference"])
+
+        review_modes = cfg.setdefault("review_modes", {})
+        for key, defaults in DEFAULT_REVIEW_MODE_CONFIG.items():
+            existing = review_modes.get(key, {})
+            review_modes[key] = {**defaults, **existing}
+
+        # Accept common spelling variant.
+        review_modes.setdefault("camera-ready", review_modes["camera_ready"])
+
+
+_ensure_context_blocks()
 
 
 # ─────────────────────────────────────────────────────────────────

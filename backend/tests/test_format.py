@@ -930,7 +930,7 @@ from modules.format_checker import run_format_check
 
 def test_faulty_paper():
     # 1. Path to your uploaded faulty PDF
-    pdf_name = "faulty_paper.pdf"
+    pdf_name = "faulty_format_paper.pdf"
     pdf_path = os.path.join("tests", "sample_papers", pdf_name)
     
     if not os.path.exists(pdf_path):

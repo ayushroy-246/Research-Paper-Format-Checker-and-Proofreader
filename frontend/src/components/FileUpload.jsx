@@ -4,6 +4,10 @@ import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import axios from 'axios';
 
+const API_BASE_URL = (
+  import.meta.env.VITE_SERVER_URL || import.meta.env.VITE_BACKEND_URL || ''
+).replace(/\/$/, '');
+
 const FileUpload = () => {
   const [file, setFile] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -38,6 +42,11 @@ const FileUpload = () => {
   const handleUpload = async () => {
     if (!file) return;
 
+    if (!API_BASE_URL) {
+      setError('Backend URL is not configured. Set VITE_SERVER_URL (or VITE_BACKEND_URL) in Vercel.');
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
     const formData = new FormData();
@@ -45,7 +54,7 @@ const FileUpload = () => {
 
     try {
       // Step 1: Upload
-      const uploadResponse = await axios.post(`${import.meta.env.VITE_SERVER_URL}/api/upload`, formData);
+      const uploadResponse = await axios.post(`${API_BASE_URL}/api/upload`, formData);
       console.log('Upload successful:', uploadResponse.data);
 
       // Step 2: Analyze
@@ -55,7 +64,7 @@ const FileUpload = () => {
         review_mode: review_mode || null,
         use_crossref,
       };
-      const analyzeResponse = await axios.post(`${import.meta.env.VITE_SERVER_URL}/api/analyze`, analyzeData);
+      const analyzeResponse = await axios.post(`${API_BASE_URL}/api/analyze`, analyzeData);
       console.log('Analysis successful:', analyzeResponse.data);
 
       // Navigate to results page with data

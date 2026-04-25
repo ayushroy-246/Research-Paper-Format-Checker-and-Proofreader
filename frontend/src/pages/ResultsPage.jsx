@@ -3,6 +3,10 @@ import { useLocation } from 'react-router-dom';
 import ReactSpeedometer from 'react-d3-speedometer';
 import axios from 'axios';
 
+const API_BASE_URL = (
+  import.meta.env.VITE_SERVER_URL || import.meta.env.VITE_BACKEND_URL || ''
+).replace(/\/$/, '');
+
 const ResultsPage = () => {
   const location = useLocation();
   const { results } = location.state || {};
@@ -20,10 +24,14 @@ const ResultsPage = () => {
   const handleGenerateReport = async () => {
     setIsGenerating(true);
     try {
-      console.log('Downloading analysis report from:', `${import.meta.env.VITE_SERVER_URL}/api/generate-report`);
+      if (!API_BASE_URL) {
+        throw new Error('Backend URL is not configured. Set VITE_SERVER_URL (or VITE_BACKEND_URL).');
+      }
+
+      console.log('Downloading analysis report from:', `${API_BASE_URL}/api/generate-report`);
       
       const response = await axios.post(
-        `${import.meta.env.VITE_SERVER_URL}/api/generate-report`, 
+        `${API_BASE_URL}/api/generate-report`, 
         { results }, 
         {
           responseType: 'blob',
